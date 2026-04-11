@@ -159,6 +159,8 @@ def generate_spore_app(
 httpx>=0.27
 numpy>=1.24
 sentence-transformers>=3.0
+fastapi>=0.115
+uvicorn>=0.30
 """
 
     readme_md = f"""---

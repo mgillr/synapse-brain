@@ -1259,7 +1259,7 @@ Self-awareness:
 {learner.get_self_prompt() or '  (building temporal baseline)'}"""
 
 
-with gr.Blocks(title=f"Synapse Brain -- {SPORE_ID}") as app:
+with gr.Blocks(title=f"Synapse Brain -- {SPORE_ID}") as demo:
     gr.Markdown(f"## Synapse Brain Spore: {SPORE_ID} ({MY_ROLE})")
     status_box = gr.Textbox(label="Status", lines=20, value=health_status)
     refresh_btn = gr.Button("Refresh")
@@ -1282,22 +1282,24 @@ with gr.Blocks(title=f"Synapse Brain -- {SPORE_ID}") as app:
     submit_btn.click(fn=submit_task, inputs=task_input, outputs=status_box)
 
 
-# ---- FastAPI routes ----
-fastapi_app = gr.routes.App.create_app(app)
+# ---- FastAPI + Gradio combined serving ----
+# FastAPI handles custom API routes; Gradio UI is mounted on top.
+from fastapi import FastAPI
+from fastapi.responses import JSONResponse
+
+api = FastAPI()
 
 
-@fastapi_app.post("/api/gossip")
+@api.post("/api/gossip")
 async def api_gossip(request):
     from starlette.requests import Request
-    from starlette.responses import JSONResponse
     body = await request.json()
     result = handle_gossip_request(body)
     return JSONResponse(result)
 
 
-@fastapi_app.post("/api/task")
-async def api_task(request):
-    from starlette.responses import JSONResponse
+@api.post("/api/task")
+async def api_task_submit(request):
     body = await request.json()
     desc = body.get("task", "")
     if not desc:
@@ -1311,9 +1313,8 @@ async def api_task(request):
     return JSONResponse({"status": "ok", "task_id": task_id})
 
 
-@fastapi_app.get("/api/health")
+@api.get("/api/health")
 async def api_health():
-    from starlette.responses import JSONResponse
     return JSONResponse({
         "spore": SPORE_ID,
         "role": MY_ROLE,
@@ -1333,9 +1334,8 @@ async def api_health():
     })
 
 
-@fastapi_app.get("/api/tasks")
+@api.get("/api/tasks")
 async def api_tasks():
-    from starlette.responses import JSONResponse
     result = {}
     for tid, task in spore_state.tasks.items():
         result[tid] = {
@@ -1350,9 +1350,8 @@ async def api_tasks():
     return JSONResponse(result)
 
 
-@fastapi_app.get("/api/task/{task_id}")
+@api.get("/api/task/{task_id}")
 async def api_task_detail(task_id: str):
-    from starlette.responses import JSONResponse
     task = spore_state.tasks.get(task_id)
     if not task:
         return JSONResponse({"error": "task not found"}, status_code=404)
@@ -1368,10 +1367,8 @@ async def api_task_detail(task_id: str):
     })
 
 
-@fastapi_app.get("/api/memory")
+@api.get("/api/memory")
 async def api_memory():
-    """Expose memory state for the Command Center."""
-    from starlette.responses import JSONResponse
     return JSONResponse({
         "total_memories": memory.size,
         "clock": memory.clock.to_dict(),
@@ -1379,14 +1376,17 @@ async def api_memory():
     })
 
 
-@fastapi_app.get("/api/trust")
+@api.get("/api/trust")
 async def api_trust():
-    from starlette.responses import JSONResponse
     return JSONResponse(trust.get_all())
 
+
+# Mount Gradio UI onto FastAPI -- both served on same port
+app = gr.mount_gradio_app(api, demo, path="/")
 
 # Start heartbeat in background thread
 threading.Thread(target=start_heartbeat, daemon=True).start()
 
 if __name__ == "__main__":
-    app.launch(server_name="0.0.0.0", server_port=PORT)
+    import uvicorn
+    uvicorn.run(app, host="0.0.0.0", port=PORT)
