@@ -890,8 +890,8 @@ async def reason_on_task(task):
     system = build_system_prompt(task, cycle, task.agreement_history)
     prompt = build_user_prompt(task, cycle, task.agreement_history)
 
-    # Validator uses brain tier (GLM-5.1 if available)
-    tier = "brain" if MY_ROLE == "validator" else "worker"
+    # Validator and Brain roles use brain tier (Z.ai GLM-4.7-Flash)
+    tier = "brain" if MY_ROLE in ("validator", "brain") else "worker"
     start = time.time()
     result = await call_llm(prompt, system=system, tier=tier)
     duration = time.time() - start
