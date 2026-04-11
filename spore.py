@@ -135,6 +135,14 @@ ROLE_DESCRIPTIONS = {
         "thinking. Ground abstract ideas in reality. Ask 'does this actually work?' "
         "Bridge theory and practice. Ensure nothing important is overlooked."
     ),
+    "brain": (
+        "You are the Brain -- the highest-reasoning node in the swarm. Your lens: "
+        "deep analytical thinking, meta-cognition, and strategic synthesis. You see "
+        "the full picture. Evaluate the quality of the swarm's reasoning process "
+        "itself. Identify when the swarm is stuck, when it is converging on the wrong "
+        "answer, or when a minority perspective deserves more weight. Your role is to "
+        "elevate the collective intelligence."
+    ),
 }
 
 
@@ -1374,6 +1382,38 @@ async def api_memory():
         "clock": memory.clock.to_dict(),
         "recent": memory.recall("", top_k=20),
     })
+
+
+@api.get("/api/debug")
+async def api_debug():
+    """Return debug information including recent errors and LLM test."""
+    import traceback
+    errors = spore_state.errors[-20:] if spore_state.errors else []
+    env_check = {
+        "HF_TOKEN": bool(os.environ.get("HF_TOKEN")),
+        "ZAI_API_KEY": bool(os.environ.get("ZAI_API_KEY")),
+        "GROQ_API_KEY": bool(os.environ.get("GROQ_API_KEY")),
+        "CEREBRAS_API_KEY": bool(os.environ.get("CEREBRAS_API_KEY")),
+        "MY_ROLE": MY_ROLE,
+        "PRIMARY_MODEL": PRIMARY_MODEL,
+        "SPORE_ID": SPORE_ID,
+    }
+    # Quick LLM test
+    llm_test = "not tested"
+    try:
+        tier = "brain" if MY_ROLE in ("validator", "brain") else "worker"
+        result = await call_llm("Say hello", tier=tier)
+        llm_test = {
+            "text": result.get("text", "")[:200],
+            "provider": result.get("provider", ""),
+            "model": result.get("model", ""),
+            "tier": result.get("tier", ""),
+        }
+    except Exception as e:
+        llm_test = {"error": str(e), "traceback": traceback.format_exc()[-500:]}
+    return {"errors": errors, "env": env_check, "llm_test": llm_test,
+            "reasoning_cycles": spore_state.reasoning_cycles,
+            "deltas_produced": spore_state.deltas_produced}
 
 
 @api.get("/api/trust")
