@@ -31,6 +31,7 @@ import httpx
 from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.metrics.pairwise import cosine_similarity
 
+from starlette.requests import Request
 from crdt_merge.core import ORSet, LWWMap
 from crdt_merge.clocks import VectorClock
 from crdt_merge.merkle import MerkleTree
@@ -1291,15 +1292,14 @@ api = FastAPI()
 
 
 @api.post("/api/gossip")
-async def api_gossip(request):
-    from starlette.requests import Request
+async def api_gossip(request: Request):
     body = await request.json()
     result = handle_gossip_request(body)
     return JSONResponse(result)
 
 
 @api.post("/api/task")
-async def api_task_submit(request):
+async def api_task_submit(request: Request):
     body = await request.json()
     desc = body.get("task", "")
     if not desc:
