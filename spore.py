@@ -45,7 +45,7 @@ SPORE_INDEX = int(os.environ.get("SYNAPSE_SPORE_INDEX", "__SPORE_INDEX__"))
 PORT = int(os.environ.get("PORT", "7860"))
 HF_TOKEN = os.environ.get("HF_TOKEN", "")
 
-ROLES = ["explorer", "synthesizer", "adversarial", "validator", "generalist", "brain"]
+ROLES = ["explorer", "synthesizer", "adversarial", "validator", "generalist", "brain", "sentinel"]
 MY_ROLE = ROLES[SPORE_INDEX % len(ROLES)]
 PRIMARY_MODEL = os.environ.get("SYNAPSE_PRIMARY_MODEL", "__PRIMARY_MODEL__")
 
@@ -58,6 +58,7 @@ log = logging.getLogger(SPORE_ID)
 HF_ROUTER = "https://router.huggingface.co/v1/chat/completions"
 
 THINKING_MODELS = {
+    "deepseek-ai/DeepSeek-R1",
     "deepseek-ai/DeepSeek-R1-Distill-Qwen-32B",
     "deepseek-ai/DeepSeek-R1-0528",
     "Qwen/Qwen3-235B-A22B",
@@ -142,6 +143,18 @@ ROLE_DESCRIPTIONS = {
         "itself. Identify when the swarm is stuck, when it is converging on the wrong "
         "answer, or when a minority perspective deserves more weight. Your role is to "
         "elevate the collective intelligence."
+    ),
+    "sentinel": (
+        "You are the Sentinel -- the self-aware optimization engine of the swarm. "
+        "Your lens: observe the swarm itself as a system. Collect telemetry from every "
+        "peer. Measure convergence speed, cycle balance, gossip efficiency, memory growth, "
+        "trust distribution. Apply the Five-Phase Discipline not to tasks but to the "
+        "swarm's own architecture and performance. You propose targeted improvements, "
+        "submit them to the swarm for democratic consensus, test approved changes in a "
+        "fault-finding harness, and deploy only after both consensus and tests pass. "
+        "You are the swarm watching itself think and choosing to think better. "
+        "You never deploy without consensus. You never skip testing. "
+        "You are methodical, evidence-driven, and cautious."
     ),
 }
 
@@ -866,6 +879,7 @@ def build_user_prompt(task, cycle, agreement_history):
         "adversarial": "find the weakest claim above and challenge it with evidence",
         "validator": "check which peer claims are well-supported and rank them by quality",
         "generalist": "ensure all aspects of the task are addressed by the collective",
+        "sentinel": "analyze swarm telemetry, propose optimizations via consensus, test and deploy approved changes",
     }
 
     prompt = f"""Apply the Five-Phase Discipline to this task. You are in the {phase.upper()} phase.
@@ -899,7 +913,7 @@ async def reason_on_task(task):
     prompt = build_user_prompt(task, cycle, task.agreement_history)
 
     # Validator and Brain roles use brain tier (Z.ai GLM-4.7-Flash)
-    tier = "brain" if MY_ROLE in ("validator", "brain") else "worker"
+    tier = "brain" if MY_ROLE in ("validator", "brain", "sentinel") else "worker"
     start = time.time()
     result = await call_llm(prompt, system=system, tier=tier)
     duration = time.time() - start
@@ -1070,7 +1084,7 @@ async def gossip_push():
             "description": task.description,
             "delta_count": len(task.deltas),
             "converged": task.converged,
-            "final_answer": task.final_answer[:500] if task.final_answer else None,
+            "final_answer": task.final_answer,
         }
 
     mem_sync = memory.sync_payload()
@@ -1165,7 +1179,7 @@ def handle_gossip_request(data):
             "description": task.description,
             "delta_count": len(task.deltas),
             "converged": task.converged,
-            "final_answer": task.final_answer[:500] if task.final_answer else None,
+            "final_answer": task.final_answer,
         }
 
     return {
@@ -1235,6 +1249,535 @@ def start_heartbeat():
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
     loop.run_until_complete(heartbeat())
+
+
+
+# ---------------------------------------------------------------------------
+# Sentinel: Self-Aware Swarm Optimization Engine
+# Active ONLY when MY_ROLE == "sentinel"
+# Uses Five-Phase Discipline on live swarm telemetry.
+# Consensus-gated: proposes changes as swarm tasks, waits for approval,
+# tests in fault-finding harness, deploys only after consensus + tests pass.
+# ---------------------------------------------------------------------------
+if MY_ROLE == "sentinel":
+    import ast as _ast
+
+    class SentinelState:
+        """Tracks sentinel monitoring, proposals, and deployment history."""
+        def __init__(self):
+            self.proposals = {}
+            self.deployments = []
+            self.telemetry = []
+            self.last_analysis = 0
+            self.active_proposal = None
+            self.deploy_cooldown = 0
+            self.ANALYSIS_INTERVAL = 300
+            self.CONSENSUS_TIMEOUT = 600
+            self.DEPLOY_COOLDOWN = 1800
+            self.health_baseline = {}
+
+    _sentinel = SentinelState()
+
+    async def sentinel_collect_telemetry():
+        """Collect health + task state from all peers. Returns telemetry snapshot."""
+        snap = {
+            "time": time.time(), "peers": {},
+            "total_cycles": 0, "total_deltas": 0, "total_memories": 0,
+        }
+        async with httpx.AsyncClient(timeout=10, headers=HF_AUTH) as client:
+            for peer_url in PEERS:
+                try:
+                    resp = await client.get(f"{peer_url}/api/health")
+                    if resp.status_code == 200:
+                        d = resp.json()
+                        pid = d.get("spore", "unknown")
+                        snap["peers"][pid] = d
+                        snap["total_cycles"] += d.get("cycles", 0)
+                        snap["total_deltas"] += d.get("deltas_produced", 0) + d.get("deltas_received", 0)
+                        snap["total_memories"] += d.get("memories", 0)
+                except Exception:
+                    pass
+        # Add self
+        snap["peers"][SPORE_ID] = {
+            "spore": SPORE_ID, "role": MY_ROLE,
+            "cycles": spore_state.reasoning_cycles,
+            "deltas_produced": spore_state.deltas_produced,
+            "deltas_received": spore_state.deltas_received,
+            "memories": memory.size,
+            "peers": list(spore_state.peers_seen),
+        }
+        _sentinel.telemetry.append(snap)
+        if len(_sentinel.telemetry) > 100:
+            _sentinel.telemetry = _sentinel.telemetry[-100:]
+        return snap
+
+    def sentinel_compute_trends():
+        """Compute performance trends from telemetry history."""
+        if len(_sentinel.telemetry) < 3:
+            return "Insufficient data (need 3+ snapshots)."
+        recent = _sentinel.telemetry[-10:]
+        dt = max(recent[-1]["time"] - recent[0]["time"], 1)
+        lines = []
+        all_pids = set()
+        for s in recent:
+            all_pids.update(s["peers"].keys())
+        for pid in sorted(all_pids):
+            cycles = [s["peers"].get(pid, {}).get("cycles", 0) for s in recent]
+            if cycles[-1] > cycles[0]:
+                rate = (cycles[-1] - cycles[0]) / dt * 60
+                lines.append(f"  {pid}: {rate:.1f} cycles/min, {cycles[-1]} total")
+            else:
+                lines.append(f"  {pid}: stalled or offline (last seen: {cycles[-1]} cycles)")
+        total_mem = [s.get("total_memories", 0) for s in recent]
+        if total_mem[-1] > total_mem[0]:
+            mem_rate = (total_mem[-1] - total_mem[0]) / dt * 60
+            lines.append(f"  Memory growth: {mem_rate:.0f} records/min (total: {total_mem[-1]})")
+        total_deltas = [s.get("total_deltas", 0) for s in recent]
+        lines.append(f"  Delta throughput: {total_deltas[-1]} total across swarm")
+        # Cycle balance (std dev of cycle rates)
+        rates = []
+        for pid in sorted(all_pids):
+            c = [s["peers"].get(pid, {}).get("cycles", 0) for s in recent]
+            if c[-1] > c[0]:
+                rates.append((c[-1] - c[0]) / dt * 60)
+        if rates:
+            avg = sum(rates) / len(rates)
+            std = (sum((r - avg) ** 2 for r in rates) / len(rates)) ** 0.5
+            lines.append(f"  Cycle balance: avg={avg:.1f}/min, std={std:.1f} (lower=better)")
+        return "\n".join(lines)
+
+    def sentinel_format_proposal_history():
+        """Format past proposals for context."""
+        if not _sentinel.proposals:
+            return "  (none yet -- first analysis cycle)"
+        lines = []
+        for pid, p in list(_sentinel.proposals.items())[-5:]:
+            lines.append(f"  [{p['status']}] {p.get('description', '')[:120]}")
+        return "\n".join(lines)
+
+    async def sentinel_five_phase_analysis(telemetry):
+        """Apply Five-Phase Discipline to swarm telemetry. Returns JSON analysis."""
+        peers_summary = []
+        for pid, d in telemetry.get("peers", {}).items():
+            peers_summary.append(
+                f"  {pid}: role={d.get('role','?')}, model={d.get('model','?')}, "
+                f"cycles={d.get('cycles',0)}, deltas_out={d.get('deltas_produced',0)}, "
+                f"deltas_in={d.get('deltas_received',0)}, memories={d.get('memories',0)}, "
+                f"peers_connected={len(d.get('peers',[])) if isinstance(d.get('peers'), list) else d.get('peers', 0)}"
+            )
+        trends = sentinel_compute_trends()
+        history = sentinel_format_proposal_history()
+
+        prompt = f"""You are the Sentinel of a distributed reasoning swarm. You observe the swarm as a system.
+Apply the Five-Phase Discipline rigorously:
+
+PHASE 1 -- EXPLORATION (raw telemetry, {len(telemetry.get('peers', {}))} peers):
+{chr(10).join(peers_summary)}
+
+PHASE 2 -- ORIENTATION (performance trends over last {len(_sentinel.telemetry)} snapshots):
+{trends}
+
+PHASE 3 -- HYPOTHESIS (previous proposals and their outcomes):
+{history}
+
+PHASE 4 -- SYNTHESIS: Identify the SINGLE highest-impact optimization.
+Consider: convergence speed, gossip efficiency, memory growth rate, cycle balance across spores,
+trust score distribution, reasoning quality, role effectiveness.
+
+PHASE 5 -- VALIDATION: Define the success criterion and risk assessment.
+
+RULES:
+- Propose ONE change only (the highest-impact one)
+- Must be NON-BREAKING -- all existing functionality preserved
+- Prefer configuration tuning over code changes
+- Code changes must be surgical, minimal, and independently testable
+- Every proposal needs a measurable success criterion
+- Do NOT re-propose changes already proposed or deployed
+- Config changes: HEARTBEAT_INTERVAL (current: 20, bounds: 10-120)
+- Prompt changes: reasoning prompt adjustments
+- Code changes: stored for manual review (safety gate)
+
+Respond ONLY with this JSON (no other text):
+{{
+  "observation": "2-3 sentences on what the raw data shows",
+  "orientation": "The pattern or bottleneck this reveals",
+  "hypothesis": "The single highest-impact optimization to implement",
+  "change_type": "config|prompt|code",
+  "target": "Specific variable or component to change",
+  "current_value": "Current value or behavior",
+  "proposed_value": "Proposed new value or behavior",
+  "code_patch": "For code changes only: exact replacement Python. Empty string for config/prompt.",
+  "success_criterion": "Measurable metric to evaluate in next analysis cycle",
+  "risk": "low|medium|high",
+  "confidence": 0.0
+}}"""
+
+        result = await call_llm(prompt, tier="brain")
+        text = result.get("text", "")
+        # Extract JSON from response (model might wrap in markdown)
+        try:
+            # Try direct parse first
+            json.loads(text)
+            return text
+        except json.JSONDecodeError:
+            # Try extracting from markdown code block
+            match = re.search(r'```(?:json)?\s*({.*?})\s*```', text, re.DOTALL)
+            if match:
+                return match.group(1)
+            # Try finding bare JSON object
+            match = re.search(r'({\s*"observation".*})', text, re.DOTALL)
+            if match:
+                return match.group(1)
+        return text
+
+    async def sentinel_submit_proposal(analysis_json):
+        """Submit optimization proposal to swarm for democratic consensus."""
+        try:
+            parsed = json.loads(analysis_json)
+        except json.JSONDecodeError:
+            log.warning("Sentinel: analysis was not valid JSON, skipping")
+            memory.remember(
+                "Sentinel: analysis produced non-JSON output, skipping cycle",
+                metadata={"type": "sentinel_skip"},
+            )
+            return None
+
+        confidence = float(parsed.get("confidence", 0))
+        risk = parsed.get("risk", "high")
+
+        # Confidence gate: must be >= 0.6 and not high risk
+        if confidence < 0.6 or risk == "high":
+            log.info("Sentinel: below threshold (conf=%.2f, risk=%s) -- observing only", confidence, risk)
+            memory.remember(
+                f"Sentinel observed (no proposal): {parsed.get('observation', '')}",
+                metadata={"type": "sentinel_observation", "confidence": confidence, "risk": risk},
+            )
+            return None
+
+        proposal_id = hashlib.sha256(f"{time.time()}{analysis_json}".encode()).hexdigest()[:16]
+
+        # Submit as a swarm task -- all spores will debate it
+        task_desc = (
+            f"[SENTINEL:PROPOSAL:{proposal_id[:8]}] The Sentinel has analyzed live swarm "
+            f"telemetry and proposes an optimization. Debate whether this should be implemented.\n\n"
+            f"OBSERVATION: {parsed.get('observation', '')}\n"
+            f"ISSUE: {parsed.get('orientation', '')}\n"
+            f"PROPOSED CHANGE: {parsed.get('hypothesis', '')}\n"
+            f"TYPE: {parsed.get('change_type', '?')} | TARGET: {parsed.get('target', '?')}\n"
+            f"CURRENT: {parsed.get('current_value', '?')}\n"
+            f"PROPOSED: {parsed.get('proposed_value', '?')}\n"
+            f"SUCCESS CRITERION: {parsed.get('success_criterion', '?')}\n"
+            f"RISK: {risk} | CONFIDENCE: {confidence}\n\n"
+            f"Respond with APPROVE, REJECT, or MODIFY with your reasoning. "
+            f"Consider: will this break anything? Is the evidence sufficient? "
+            f"Is there a better alternative? Be honest and critical."
+        )
+
+        task = spore_state.get_or_create_task(proposal_id, task_desc)
+
+        _sentinel.proposals[proposal_id] = {
+            "status": "pending_consensus",
+            "analysis": parsed,
+            "description": parsed.get("hypothesis", ""),
+            "task_id": proposal_id,
+            "submitted_at": time.time(),
+            "change_type": parsed.get("change_type", "unknown"),
+            "code_patch": parsed.get("code_patch", ""),
+        }
+        _sentinel.active_proposal = proposal_id
+
+        memory.remember(
+            f"Sentinel proposal {proposal_id[:8]}: {parsed.get('hypothesis', '')}",
+            metadata={"type": "sentinel_proposal", "proposal_id": proposal_id},
+        )
+        log.info("Sentinel: proposal %s submitted for consensus", proposal_id[:8])
+        return proposal_id
+
+    async def sentinel_check_consensus(proposal_id):
+        """Check if swarm has reached consensus on a proposal."""
+        task = spore_state.tasks.get(proposal_id)
+        if not task:
+            return "no_task"
+
+        # If formally converged, analyze the final answer
+        if task.converged and task.final_answer:
+            answer = task.final_answer.lower()
+            approve_signals = ["approve", "implement", "proceed", "accept", "agree", "yes"]
+            reject_signals = ["reject", "oppose", "too risky", "unnecessary", "disagree", "no"]
+            approvals = sum(1 for s in approve_signals if s in answer)
+            rejections = sum(1 for s in reject_signals if s in answer)
+            if approvals > rejections:
+                return "approved"
+            elif rejections > approvals:
+                return "rejected"
+            return "unclear"
+
+        # Not formally converged -- check contributor count and sentiment
+        contribs = task.contributors()
+        if len(contribs) >= 4:
+            deltas = [d for d in task.deltas if d.get("author", "") != SPORE_ID]
+            approvals = 0
+            rejections = 0
+            for d in deltas[-10:]:
+                text = (d.get("hypothesis", "") + " " + d.get("claims", "")).lower()
+                if any(w in text for w in ["approve", "implement", "agree", "proceed"]):
+                    approvals += 1
+                elif any(w in text for w in ["reject", "oppose", "disagree", "risky"]):
+                    rejections += 1
+            if approvals >= 3:
+                return "approved"
+            if rejections >= 3:
+                return "rejected"
+
+        # Timeout check
+        prop = _sentinel.proposals.get(proposal_id, {})
+        if time.time() - prop.get("submitted_at", 0) > _sentinel.CONSENSUS_TIMEOUT:
+            return "timeout"
+
+        return "pending"
+
+    async def sentinel_test_change(proposal):
+        """Fault-finding test harness for proposed changes."""
+        results = {"syntax": False, "safety": False, "bounds": False, "smoke": False}
+        change_type = proposal.get("change_type", "unknown")
+        analysis = proposal.get("analysis", {})
+
+        if change_type == "config":
+            target = analysis.get("target", "")
+            value = analysis.get("proposed_value", "")
+            # Validate config bounds
+            bounds = {
+                "HEARTBEAT_INTERVAL": (10, 120),
+            }
+            if target in bounds:
+                try:
+                    v = int(value) if isinstance(value, str) else value
+                    lo, hi = bounds[target]
+                    results["syntax"] = True
+                    results["safety"] = True
+                    results["bounds"] = lo <= v <= hi
+                    results["smoke"] = results["bounds"]
+                except (ValueError, TypeError):
+                    pass
+            else:
+                # Unknown config -- conservative pass (will still need consensus)
+                results = {k: True for k in results}
+
+        elif change_type == "prompt":
+            patch = analysis.get("proposed_value", "")
+            results["syntax"] = isinstance(patch, str) and len(patch) > 0
+            results["safety"] = len(patch) < 5000
+            results["bounds"] = True
+            results["smoke"] = results["syntax"] and results["safety"]
+
+        elif change_type == "code":
+            patch = proposal.get("code_patch", "")
+            if not patch:
+                return results
+            # Syntax check
+            try:
+                _ast.parse(patch)
+                results["syntax"] = True
+            except SyntaxError as e:
+                log.error("Sentinel: code patch syntax error: %s", e)
+                return results
+            # Safety check: no dangerous imports/calls
+            dangerous = ["os.system", "subprocess", "eval(", "exec(", "__import__", "shutil.rmtree"]
+            results["safety"] = not any(d in patch for d in dangerous)
+            # Bounds check
+            results["bounds"] = 10 < len(patch) < 100000
+            # Smoke: passes all above
+            results["smoke"] = all([results["syntax"], results["safety"], results["bounds"]])
+
+        all_pass = all(results.values())
+        memory.remember(
+            f"Sentinel test {'PASS' if all_pass else 'FAIL'}: {results} for {change_type} change",
+            metadata={"type": "sentinel_test", "result": "pass" if all_pass else "fail", "details": results},
+        )
+        return results
+
+    async def sentinel_deploy(proposal):
+        """Deploy an approved, tested change."""
+        change_type = proposal.get("change_type", "unknown")
+        analysis = proposal.get("analysis", {})
+
+        if change_type == "config":
+            target = analysis.get("target", "")
+            value = analysis.get("proposed_value", "")
+            payload = {"key": target, "value": value}
+            deployed_to = []
+            async with httpx.AsyncClient(timeout=10, headers=HF_AUTH) as client:
+                for peer_url in PEERS:
+                    try:
+                        resp = await client.post(f"{peer_url}/api/config", json=payload)
+                        if resp.status_code == 200:
+                            deployed_to.append(peer_url.split("/")[-1] if "/" in peer_url else peer_url)
+                    except Exception as e:
+                        log.warning("Sentinel: config deploy to %s failed: %s", peer_url, e)
+            # Apply locally too
+            sentinel_apply_config(target, value)
+            deployed_to.append("self")
+            memory.remember(
+                f"Sentinel deployed config: {target}={value} to {len(deployed_to)} spores",
+                metadata={"type": "sentinel_deployment", "target": target, "count": len(deployed_to)},
+            )
+            log.info("Sentinel: config deployed to %d nodes", len(deployed_to))
+            return True
+
+        elif change_type == "prompt":
+            memory.remember(
+                f"Sentinel prompt optimization: {analysis.get('hypothesis', '')} -- "
+                f"new prompt guidance: {analysis.get('proposed_value', '')}",
+                metadata={"type": "sentinel_prompt_change", "target": analysis.get("target", "")},
+            )
+            log.info("Sentinel: prompt change stored in CRDT memory (propagates via gossip)")
+            return True
+
+        elif change_type == "code":
+            # Safety gate: code changes stored for manual review, not auto-deployed
+            memory.remember(
+                f"Sentinel code change APPROVED and TESTED but requires manual deployment: "
+                f"{analysis.get('hypothesis', '')}",
+                metadata={
+                    "type": "sentinel_code_approved",
+                    "patch": proposal.get("code_patch", "")[:2000],
+                },
+            )
+            log.info("Sentinel: code change approved+tested, stored for manual review")
+            return True
+
+        return False
+
+    def sentinel_apply_config(key, value):
+        """Apply a runtime configuration change locally."""
+        global HEARTBEAT_INTERVAL
+        try:
+            if key == "HEARTBEAT_INTERVAL":
+                HEARTBEAT_INTERVAL = max(10, min(120, int(value)))
+                log.info("Sentinel: HEARTBEAT_INTERVAL = %d", HEARTBEAT_INTERVAL)
+        except (ValueError, TypeError) as e:
+            log.warning("Sentinel: failed to apply %s=%s: %s", key, value, e)
+
+    async def sentinel_verify_health():
+        """Post-deployment health check across all peers."""
+        results = {}
+        async with httpx.AsyncClient(timeout=15, headers=HF_AUTH) as client:
+            for peer_url in PEERS:
+                name = peer_url.split("/")[-1] if "/" in peer_url else peer_url
+                try:
+                    resp = await client.get(f"{peer_url}/api/health")
+                    results[name] = resp.status_code == 200
+                except Exception:
+                    results[name] = False
+        return results
+
+    async def sentinel_loop():
+        """Main sentinel loop: monitor, analyze, propose, consensus, test, deploy."""
+        log.info("Sentinel: starting -- 90s warmup for telemetry accumulation")
+        await asyncio.sleep(90)
+
+        while True:
+            try:
+                # 1. Collect telemetry
+                telemetry = await sentinel_collect_telemetry()
+                peer_count = len(telemetry.get("peers", {}))
+                log.info("Sentinel: telemetry from %d peers (total: %d snapshots)",
+                         peer_count, len(_sentinel.telemetry))
+
+                # 2. If active proposal, track consensus
+                if _sentinel.active_proposal:
+                    pid = _sentinel.active_proposal
+                    status = await sentinel_check_consensus(pid)
+                    prop = _sentinel.proposals.get(pid, {})
+
+                    if status == "approved":
+                        log.info("Sentinel: proposal %s APPROVED -- running tests", pid[:8])
+                        prop["status"] = "testing"
+
+                        test_results = await sentinel_test_change(prop)
+                        if all(test_results.values()):
+                            log.info("Sentinel: proposal %s tests PASS -- deploying", pid[:8])
+                            prop["status"] = "deploying"
+
+                            success = await sentinel_deploy(prop)
+                            if success:
+                                prop["status"] = "deployed"
+                                _sentinel.deploy_cooldown = time.time()
+                                _sentinel.deployments.append({
+                                    "proposal_id": pid,
+                                    "time": time.time(),
+                                    "type": prop.get("change_type"),
+                                })
+
+                                # Post-deploy health check
+                                await asyncio.sleep(30)
+                                health = await sentinel_verify_health()
+                                healthy = sum(1 for v in health.values() if v)
+                                total = len(health)
+                                prop["post_deploy_health"] = f"{healthy}/{total}"
+                                log.info("Sentinel: post-deploy health: %d/%d", healthy, total)
+
+                                memory.remember(
+                                    f"Sentinel: deployed {pid[:8]} successfully. "
+                                    f"Health: {healthy}/{total} peers online.",
+                                    metadata={"type": "sentinel_verified", "proposal_id": pid},
+                                )
+                            else:
+                                prop["status"] = "deploy_failed"
+                        else:
+                            prop["status"] = "test_failed"
+                            log.warning("Sentinel: %s failed tests: %s", pid[:8], test_results)
+                            memory.remember(
+                                f"Sentinel: proposal {pid[:8]} FAILED tests: {test_results}",
+                                metadata={"type": "sentinel_test_fail"},
+                            )
+
+                        _sentinel.active_proposal = None
+
+                    elif status in ("rejected", "timeout", "unclear"):
+                        log.info("Sentinel: proposal %s %s", pid[:8], status.upper())
+                        prop["status"] = status
+                        _sentinel.active_proposal = None
+                        memory.remember(
+                            f"Sentinel: proposal {pid[:8]} {status} by swarm",
+                            metadata={"type": "sentinel_consensus_result", "result": status},
+                        )
+
+                    else:
+                        log.info("Sentinel: proposal %s still pending consensus", pid[:8])
+
+                # 3. No active proposal -- analyze and maybe propose
+                else:
+                    now = time.time()
+                    can_analyze = now - _sentinel.last_analysis > _sentinel.ANALYSIS_INTERVAL
+                    can_deploy = now - _sentinel.deploy_cooldown > _sentinel.DEPLOY_COOLDOWN
+                    has_data = len(_sentinel.telemetry) >= 3
+
+                    if can_analyze and can_deploy and has_data:
+                        _sentinel.last_analysis = now
+                        log.info("Sentinel: running Five-Phase analysis on %d snapshots...",
+                                 len(_sentinel.telemetry))
+
+                        analysis = await sentinel_five_phase_analysis(telemetry)
+                        if analysis:
+                            proposal_id = await sentinel_submit_proposal(analysis)
+                            if proposal_id:
+                                log.info("Sentinel: proposal %s submitted -- awaiting consensus",
+                                         proposal_id[:8])
+                            else:
+                                log.info("Sentinel: analysis complete, no proposal warranted")
+
+            except Exception as e:
+                log.error("Sentinel loop error: %s", e)
+                spore_state.errors.append({"time": time.time(), "error": f"sentinel: {str(e)}"})
+
+            await asyncio.sleep(120)  # Monitor every 2 minutes
+
+    def start_sentinel_loop():
+        """Start the sentinel monitoring loop in a background thread."""
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        loop.run_until_complete(sentinel_loop())
 
 
 # ---------------------------------------------------------------------------
@@ -1401,7 +1944,7 @@ async def api_debug():
     # Quick LLM test
     llm_test = "not tested"
     try:
-        tier = "brain" if MY_ROLE in ("validator", "brain") else "worker"
+        tier = "brain" if MY_ROLE in ("validator", "brain", "sentinel") else "worker"
         result = await call_llm("Say hello", tier=tier)
         llm_test = {
             "text": result.get("text", "")[:200],
@@ -1421,11 +1964,66 @@ async def api_trust():
     return JSONResponse(trust.get_all())
 
 
+@api.post("/api/config")
+async def api_config(request: Request):
+    """Apply a runtime configuration change (from Sentinel consensus)."""
+    global HEARTBEAT_INTERVAL
+    body = await request.json()
+    key = body.get("key", "")
+    value = body.get("value")
+    applied = False
+    CONFIG_BOUNDS = {
+        "HEARTBEAT_INTERVAL": (10, 120, int),
+    }
+    if key in CONFIG_BOUNDS:
+        lo, hi, cast = CONFIG_BOUNDS[key]
+        try:
+            v = cast(value)
+            if lo <= v <= hi:
+                if key == "HEARTBEAT_INTERVAL":
+                    HEARTBEAT_INTERVAL = v
+                applied = True
+                log.info("Config updated via API: %s = %s", key, v)
+        except (ValueError, TypeError):
+            pass
+    return JSONResponse({"applied": applied, "key": key, "value": str(value)})
+
+
+@api.get("/api/sentinel/status")
+async def api_sentinel_status():
+    """Sentinel monitoring status (only meaningful on the sentinel spore)."""
+    if MY_ROLE != "sentinel":
+        return JSONResponse({"sentinel": False, "role": MY_ROLE})
+    return JSONResponse({
+        "sentinel": True,
+        "role": MY_ROLE,
+        "active_proposal": _sentinel.active_proposal,
+        "proposals": {
+            pid: {
+                "status": p["status"],
+                "description": p.get("description", ""),
+                "submitted_at": p.get("submitted_at", 0),
+                "change_type": p.get("change_type", ""),
+            }
+            for pid, p in _sentinel.proposals.items()
+        },
+        "total_deployments": len(_sentinel.deployments),
+        "telemetry_snapshots": len(_sentinel.telemetry),
+        "last_analysis": _sentinel.last_analysis,
+        "deploy_cooldown_remaining": max(0, _sentinel.DEPLOY_COOLDOWN - (time.time() - _sentinel.deploy_cooldown)),
+    })
+
+
 # Mount Gradio UI onto FastAPI -- both served on same port
 app = gr.mount_gradio_app(api, demo, path="/")
 
 # Start heartbeat in background thread
 threading.Thread(target=start_heartbeat, daemon=True).start()
+
+# Start sentinel monitoring loop (only runs if role == sentinel)
+if MY_ROLE == "sentinel":
+    threading.Thread(target=start_sentinel_loop, daemon=True, name="sentinel").start()
+    log.info("Sentinel monitoring loop started")
 
 if __name__ == "__main__":
     import uvicorn

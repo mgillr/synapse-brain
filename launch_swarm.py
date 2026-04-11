@@ -35,7 +35,7 @@ except ImportError:
 
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(description="Launch Synapse Brain swarm on HF Spaces")
-    p.add_argument("--count", type=int, default=6, help="Number of spores to deploy")
+    p.add_argument("--count", type=int, default=7, help="Number of spores to deploy")
     p.add_argument("--hf-token", required=True, help="HuggingFace token (Pro account)")
     p.add_argument("--hf-owner", default=None, help="HF username or org (auto-detected if omitted)")
     p.add_argument("--prefix", default="synapse-spore", help="Space name prefix")
@@ -103,10 +103,11 @@ MODEL_ASSIGNMENTS = [
     "google/gemma-3-27b-it",                     # 3: Validator   -- Google's training + Z.ai brain tier
     "meta-llama/Llama-4-Scout-17B-16E-Instruct", # 4: Generalist  -- newest MoE architecture
     "glm-4.7-flash",                            # 5: Brain       -- Z.ai GLM-4.7-Flash (free tier)
+    "deepseek-ai/DeepSeek-R1",                   # 6: Sentinel    -- full 671B MoE reasoning (strongest)
 ]
 
 # Spores that get the Z.ai API key for brain-tier access
-ZAI_SPORE_INDICES = {3, 5}  # Validator (brain-tier escalation) + Brain (primary)
+ZAI_SPORE_INDICES = {3, 5, 6}  # Validator + Brain + Sentinel (all brain-tier)
 
 
 def generate_spore_app(
