@@ -315,12 +315,52 @@
 
 <div class="header">
   <h1>SYNAPSE BRAIN -- COMMAND CENTER</h1>
+  <div style="display:flex;align-items:center;gap:4px;">
+    <button class="tab-btn active" data-tab="dashboard" onclick="switchTab('dashboard')">Dashboard</button>
+    <button class="tab-btn" data-tab="library" onclick="switchTab('library')">Library</button>
+  </div>
   <div class="status">
     <span><span class="status-dot" id="ws-status"></span><span id="ws-label">connecting</span></span>
     <span style="color:var(--muted)">uptime: <span id="uptime">0s</span></span>
   </div>
 </div>
 
+<!-- LIBRARY TAB -->
+<div id="tab-library" class="tab-content" style="display:none;">
+  <div class="library-header">
+    <div class="library-controls">
+      <div class="spore-filters" id="spore-filters">
+        <button class="filter-chip active" data-filter="all" onclick="filterConversation('all')">All Spores</button>
+      </div>
+      <div class="task-selector">
+        <select id="task-select" onchange="selectTask(this.value)">
+          <option value="all">All Tasks</option>
+        </select>
+      </div>
+      <button class="btn btn-secondary" style="padding:6px 12px;font-size:11px;" onclick="refreshLibrary()">Refresh</button>
+      <label style="display:flex;align-items:center;gap:4px;color:var(--muted);font-size:11px;cursor:pointer;">
+        <input type="checkbox" id="auto-refresh" checked onchange="toggleAutoRefresh()">
+        Auto (15s)
+      </label>
+    </div>
+    <!-- Convergence sparkline -->
+    <div class="convergence-bar" id="convergence-bar"></div>
+  </div>
+
+  <!-- Spore cards row -->
+  <div class="library-spores" id="library-spores"></div>
+
+  <!-- Conversation timeline -->
+  <div class="library-conversation" id="library-conversation">
+    <div style="text-align:center;padding:40px;color:var(--muted);">Loading conversation...</div>
+  </div>
+
+  <!-- Synthesis panel -->
+  <div class="synthesis-panel" id="synthesis-panel" style="display:none;"></div>
+</div>
+
+<!-- DASHBOARD TAB -->
+<div id="tab-dashboard" class="tab-content">
 <div class="grid">
   <!-- Stats row -->
   <div class="stats-row">

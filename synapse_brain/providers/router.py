@@ -67,6 +67,7 @@ PROVIDER_CONFIGS = {
         "model": "gemini-2.0-flash",
         "style": "google",
         "daily_limit": 1500,
+        "tier": "worker",
     },
     "groq": {
         "env_key": "GROQ_API_KEY",
@@ -74,6 +75,7 @@ PROVIDER_CONFIGS = {
         "model": "llama-3.3-70b-versatile",
         "style": "openai",
         "daily_limit": 1000,
+        "tier": "worker",
     },
     "openrouter": {
         "env_key": "OPENROUTER_API_KEY",
@@ -81,20 +83,23 @@ PROVIDER_CONFIGS = {
         "model": "meta-llama/llama-3.3-70b-instruct:free",
         "style": "openai",
         "daily_limit": 200,
+        "tier": "worker",
     },
     "cerebras": {
         "env_key": "CEREBRAS_API_KEY",
         "base_url": "https://api.cerebras.ai/v1",
         "model": "llama3.3-70b",
         "style": "openai",
-        "daily_limit": 43200,  # 30/min
+        "daily_limit": 43200,
+        "tier": "worker",
     },
     "mistral": {
         "env_key": "MISTRAL_API_KEY",
         "base_url": "https://api.mistral.ai/v1",
         "model": "mistral-small-latest",
         "style": "openai",
-        "daily_limit": 86400,  # 1/sec
+        "daily_limit": 86400,
+        "tier": "worker",
     },
     "together": {
         "env_key": "TOGETHER_API_KEY",
@@ -102,6 +107,7 @@ PROVIDER_CONFIGS = {
         "model": "meta-llama/Meta-Llama-3.1-8B-Instruct-Turbo",
         "style": "openai",
         "daily_limit": 1000,
+        "tier": "worker",
     },
     "nvidia": {
         "env_key": "NVIDIA_API_KEY",
@@ -109,6 +115,7 @@ PROVIDER_CONFIGS = {
         "model": "meta/llama-3.1-8b-instruct",
         "style": "openai",
         "daily_limit": 500,
+        "tier": "worker",
     },
     "github": {
         "env_key": "GITHUB_TOKEN",
@@ -116,6 +123,7 @@ PROVIDER_CONFIGS = {
         "model": "gpt-4o-mini",
         "style": "openai",
         "daily_limit": 200,
+        "tier": "worker",
     },
     "cloudflare": {
         "env_key": "CLOUDFLARE_API_TOKEN",
@@ -123,13 +131,15 @@ PROVIDER_CONFIGS = {
         "model": "@cf/meta/llama-3.1-8b-instruct",
         "style": "cloudflare",
         "daily_limit": 500,
+        "tier": "worker",
     },
     "cohere": {
         "env_key": "COHERE_API_KEY",
         "base_url": "https://api.cohere.ai/v1",
         "model": "command-r",
         "style": "cohere",
-        "daily_limit": 33,  # 1000/month
+        "daily_limit": 33,
+        "tier": "worker",
     },
     "hf_inference": {
         "env_key": "HF_TOKEN",
@@ -137,15 +147,29 @@ PROVIDER_CONFIGS = {
         "model": "meta-llama/Meta-Llama-3-8B-Instruct",
         "style": "hf",
         "daily_limit": 100,
+        "tier": "worker",
     },
-    "glm": {
+    "glm_flash": {
         "env_key": "GLM_API_KEY",
         "base_url": "https://open.bigmodel.cn/api/paas/v4",
         "model": "glm-4-flash",
         "style": "openai",
         "daily_limit": 1000,
+        "tier": "worker",
+    },
+    "glm_5_1": {
+        "env_key": "ZAI_API_KEY",
+        "base_url": "https://api.z.ai/v1",
+        "model": "GLM-5.1",
+        "style": "openai",
+        "daily_limit": 500,
+        "tier": "brain",
     },
 }
+
+# Tier definitions for intelligent routing
+TIER_WORKER = "worker"   # free providers -- handle basic reasoning
+TIER_BRAIN = "brain"     # GLM-5.1 -- handles synthesis, decomposition, complex tasks
 
 
 class ProviderRouter:
@@ -176,13 +200,20 @@ class ProviderRouter:
         if not self._providers:
             logger.warning("No LLM providers configured. Reasoning will fail.")
 
-    def _select_provider(self) -> str | None:
-        """Select the best available provider."""
+    def _select_provider(self, tier: str | None = None) -> str | None:
+        """Select the best available provider, optionally filtered by tier.
+
+        Args:
+            tier: If set, only consider providers of this tier.
+                  None means consider all providers.
+        """
         candidates = []
         for name, stats in self._stats.items():
             if not stats.is_available:
                 continue
             config = self._providers[name]
+            if tier and config.get("tier", TIER_WORKER) != tier:
+                continue
             if self._daily_usage.get(name, 0) >= config["daily_limit"]:
                 continue
             # Score: success_rate / (latency_ms + 1) -- prefer fast and reliable
@@ -195,29 +226,56 @@ class ProviderRouter:
         candidates.sort(reverse=True)
         return candidates[0][1]
 
-    async def reason(self, prompt: str, system_prompt: str = "") -> dict[str, Any]:
+    def has_brain_tier(self) -> bool:
+        """Check if any brain-tier provider (GLM-5.1) is configured."""
+        return any(
+            c.get("tier") == TIER_BRAIN
+            for c in self._providers.values()
+        )
+
+    async def reason_brain(self, prompt: str, system_prompt: str = "") -> dict[str, Any]:
+        """Route to brain-tier provider (GLM-5.1) for complex reasoning.
+
+        Falls back to any available worker-tier provider if brain is
+        unavailable, rate-limited, or erroring.
+        """
+        try:
+            return await self.reason(prompt, system_prompt=system_prompt, tier=TIER_BRAIN)
+        except RuntimeError:
+            logger.info("Brain tier unavailable, falling back to worker tier")
+            return await self.reason(prompt, system_prompt=system_prompt, tier=TIER_WORKER)
+
+    async def reason(self, prompt: str, system_prompt: str = "", tier: str | None = None) -> dict[str, Any]:
         """Send a reasoning request to the best available provider.
 
         Args:
             prompt: The user/task prompt.
             system_prompt: The cognitive protocol system prompt. If empty,
                 uses a generic default.
+            tier: If set, restrict to providers of this tier only.
+                  If no provider is available in the requested tier,
+                  raises RuntimeError (caller can catch and retry
+                  with a different tier).
 
-        Returns dict with keys: text, model, provider, latency_ms, confidence
+        Returns dict with keys: text, model, provider, latency_ms, confidence, tier
         """
         system = system_prompt or (
             "You are a reasoning agent in a distributed swarm. "
             "Be concise, precise, and quantitative. State your confidence level."
         )
 
-        attempts = 0
+        tried: set[str] = set()
         max_attempts = len(self._providers)
 
-        while attempts < max_attempts:
-            provider_name = self._select_provider()
+        while len(tried) < max_attempts:
+            provider_name = self._select_provider(tier=tier)
             if not provider_name:
-                raise RuntimeError("All LLM providers exhausted or rate-limited")
+                break
 
+            if provider_name in tried:
+                break
+
+            tried.add(provider_name)
             config = self._providers[provider_name]
             stats = self._stats[provider_name]
 
@@ -235,19 +293,21 @@ class ProviderRouter:
                     "provider": provider_name,
                     "latency_ms": round(latency, 1),
                     "confidence": 0.5,  # base confidence, refined by synthesis
+                    "tier": config.get("tier", TIER_WORKER),
                 }
 
             except RateLimitError:
                 stats.record_rate_limit(cooldown_seconds=60)
                 logger.info("Rate limited by %s, cooling down", provider_name)
-                attempts += 1
 
             except Exception as e:
                 stats.record_failure()
                 logger.warning("Provider %s error: %s", provider_name, e)
-                attempts += 1
 
-        raise RuntimeError("All provider attempts failed")
+        raise RuntimeError(
+            f"All providers exhausted for tier={tier or 'any'} "
+            f"(tried {len(tried)} of {max_attempts})"
+        )
 
     async def _call_provider(self, name: str, config: dict, prompt: str, system: str) -> str:
         """Make the actual API call to a specific provider."""

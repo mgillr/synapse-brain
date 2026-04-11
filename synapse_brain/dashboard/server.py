@@ -362,6 +362,125 @@ async def stop_background(app: web.Application) -> None:
 
 
 # ---------------------------------------------------------------------------
+# Live HF Spaces proxy -- polls deployed spores directly
+# ---------------------------------------------------------------------------
+
+HF_SPORE_URLS = [
+    f"https://optitransfer-synapse-spore-{i:03d}.hf.space" for i in range(5)
+]
+
+async def _fetch_spore(session: aiohttp.ClientSession, url: str, hf_token: str) -> dict[str, Any]:
+    """Fetch health + task data from one live HF spore."""
+    headers = {"Authorization": f"Bearer {hf_token}"}
+    sid = url.split("-")[-1].replace(".hf.space", "")
+    result: dict[str, Any] = {"spore": f"spore-{sid}", "url": url, "status": "offline", "health": {}, "tasks": {}, "trust": []}
+    try:
+        async with session.get(f"{url}/api/health", headers=headers, timeout=aiohttp.ClientTimeout(total=12)) as r:
+            if r.status == 200:
+                result["health"] = await r.json()
+                result["status"] = "online"
+            else:
+                result["status"] = "building"
+                return result
+    except Exception as e:
+        result["error"] = str(e)[:100]
+        return result
+
+    # Trust
+    try:
+        async with session.get(f"{url}/api/trust", headers=headers, timeout=aiohttp.ClientTimeout(total=8)) as r:
+            if r.status == 200:
+                result["trust"] = (await r.json()).get("trust_scores", [])
+    except Exception:
+        pass
+
+    # Tasks
+    try:
+        async with session.get(f"{url}/api/tasks", headers=headers, timeout=aiohttp.ClientTimeout(total=10)) as r:
+            if r.status == 200:
+                task_ids = (await r.json()).get("tasks", [])
+                for tid in task_ids:
+                    try:
+                        async with session.get(f"{url}/api/task/{tid}", headers=headers, timeout=aiohttp.ClientTimeout(total=10)) as tr:
+                            if tr.status == 200:
+                                td = await tr.json()
+                                td["task_id"] = tid
+                                result["tasks"][tid] = td
+                    except Exception:
+                        pass
+    except Exception:
+        pass
+
+    return result
+
+
+async def api_live_snapshot(request: web.Request) -> web.Response:
+    """Poll all HF spores and return a unified snapshot with full conversation data."""
+    hf_token = os.environ.get("HF_TOKEN", "")
+    if not hf_token:
+        token_path = Path.home() / ".hf_token"
+        if not token_path.exists():
+            token_path = Path("/agent/home/.hf_token")
+        if token_path.exists():
+            hf_token = token_path.read_text().strip()
+
+    if not hf_token:
+        return web.json_response({"error": "No HF_TOKEN configured"}, status=500)
+
+    async with aiohttp.ClientSession() as session:
+        results = await asyncio.gather(*[_fetch_spore(session, url, hf_token) for url in HF_SPORE_URLS])
+
+    # Merge task data across spores
+    all_tasks: dict[str, dict[str, Any]] = {}
+    conversation: list[dict[str, Any]] = []
+
+    for spore_data in results:
+        for tid, task in spore_data.get("tasks", {}).items():
+            if tid not in all_tasks:
+                all_tasks[tid] = task
+            # Extract conversation entries from contributor_detail
+            detail = task.get("contributor_detail", {})
+            for contrib_id, cd in detail.items():
+                conversation.append({
+                    "spore": contrib_id,
+                    "role": cd.get("role", "?"),
+                    "model": cd.get("model", "?"),
+                    "cycles": cd.get("cycles", 0),
+                    "hypothesis": cd.get("hypothesis", ""),
+                    "claims": cd.get("claims", []),
+                    "confidence": cd.get("confidence", 0),
+                    "phase": cd.get("phase", "?"),
+                    "task_id": tid,
+                })
+
+    # Sort conversation by spore name for consistent display
+    conversation.sort(key=lambda c: (c["task_id"], c["spore"]))
+
+    snapshot = {
+        "timestamp": time.time(),
+        "spores": [
+            {
+                "spore": r["spore"],
+                "url": r["url"],
+                "status": r["status"],
+                "role": r.get("health", {}).get("role", "?"),
+                "primary_model": r.get("health", {}).get("primary_model", "?"),
+                "clock": r.get("health", {}).get("clock", 0),
+                "cycles": r.get("health", {}).get("cycles", 0),
+                "peers": r.get("health", {}).get("peers", 0),
+                "active_tasks": r.get("health", {}).get("active_tasks", 0),
+                "trust": r.get("trust", []),
+                "errors": r.get("health", {}).get("errors", []),
+            }
+            for r in results
+        ],
+        "tasks": list(all_tasks.values()),
+        "conversation": conversation,
+    }
+    return web.json_response(snapshot)
+
+
+# ---------------------------------------------------------------------------
 # App factory
 # ---------------------------------------------------------------------------
 
@@ -390,6 +509,9 @@ def create_app(state: SwarmState | None = None) -> web.Application:
     # Delta and task result feed
     app.router.add_post("/api/deltas", api_delta_feed)
     app.router.add_post("/api/tasks/result", api_task_result)
+
+    # Live HF spore proxy
+    app.router.add_get("/api/live/snapshot", api_live_snapshot)
 
     # WebSocket
     app.router.add_get("/ws", ws_feed)

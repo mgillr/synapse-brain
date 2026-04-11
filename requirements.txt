@@ -1,0 +1,4 @@
+crdt-merge>=0.9.5
+httpx>=0.27
+numpy>=1.24
+sentence-transformers>=3.0
