@@ -1,0 +1,769 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Synapse Brain -- Command Center</title>
+<style>
+  :root {
+    --bg: #0a0e17;
+    --surface: #111827;
+    --surface2: #1a2332;
+    --border: #1e3a5f;
+    --accent: #00d4ff;
+    --accent2: #7c3aed;
+    --green: #10b981;
+    --amber: #f59e0b;
+    --red: #ef4444;
+    --text: #e2e8f0;
+    --muted: #64748b;
+    --font: 'SF Mono', 'Fira Code', 'Cascadia Code', monospace;
+  }
+
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+
+  body {
+    background: var(--bg);
+    color: var(--text);
+    font-family: var(--font);
+    font-size: 13px;
+    line-height: 1.5;
+    overflow-x: hidden;
+  }
+
+  /* -- Header -- */
+  .header {
+    background: var(--surface);
+    border-bottom: 1px solid var(--border);
+    padding: 12px 24px;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+  }
+  .header h1 {
+    font-size: 16px;
+    font-weight: 600;
+    color: var(--accent);
+    letter-spacing: 1px;
+  }
+  .header .status {
+    display: flex;
+    gap: 16px;
+    align-items: center;
+  }
+  .status-dot {
+    width: 8px; height: 8px; border-radius: 50%;
+    display: inline-block;
+    margin-right: 6px;
+  }
+  .status-dot.live { background: var(--green); box-shadow: 0 0 6px var(--green); }
+  .status-dot.dead { background: var(--red); }
+
+  /* -- Grid layout -- */
+  .grid {
+    display: grid;
+    grid-template-columns: 1fr 1fr 1fr;
+    grid-template-rows: auto 1fr 1fr;
+    gap: 12px;
+    padding: 12px;
+    height: calc(100vh - 52px);
+  }
+
+  /* -- Stat cards row -- */
+  .stats-row {
+    grid-column: 1 / -1;
+    display: grid;
+    grid-template-columns: repeat(6, 1fr);
+    gap: 12px;
+  }
+  .stat-card {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 14px 16px;
+    text-align: center;
+  }
+  .stat-card .value {
+    font-size: 28px;
+    font-weight: 700;
+    color: var(--accent);
+  }
+  .stat-card .label {
+    font-size: 11px;
+    color: var(--muted);
+    text-transform: uppercase;
+    letter-spacing: 1px;
+    margin-top: 4px;
+  }
+
+  /* -- Panel -- */
+  .panel {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+  }
+  .panel-header {
+    padding: 10px 14px;
+    border-bottom: 1px solid var(--border);
+    font-size: 12px;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 1px;
+    color: var(--muted);
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    background: var(--surface2);
+  }
+  .panel-body {
+    flex: 1;
+    overflow-y: auto;
+    padding: 10px;
+  }
+
+  /* -- Swarm topology (canvas) -- */
+  #topology-canvas {
+    width: 100%;
+    height: 100%;
+    display: block;
+  }
+
+  /* -- Spore list -- */
+  .spore-item {
+    padding: 8px 10px;
+    border-bottom: 1px solid var(--border);
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    font-size: 12px;
+    cursor: pointer;
+    transition: background 0.15s;
+  }
+  .spore-item:hover { background: var(--surface2); }
+  .spore-item .id { color: var(--accent); font-weight: 600; min-width: 100px; }
+  .spore-item .host { color: var(--muted); flex: 1; }
+  .spore-item .trust { min-width: 50px; text-align: right; }
+  .spore-item .latency { min-width: 60px; text-align: right; color: var(--muted); }
+  .trust-high { color: var(--green); }
+  .trust-mid { color: var(--amber); }
+  .trust-low { color: var(--red); }
+
+  /* -- Event log -- */
+  .event-item {
+    padding: 4px 8px;
+    font-size: 11px;
+    border-bottom: 1px solid rgba(30,58,95,0.3);
+    display: flex;
+    gap: 8px;
+  }
+  .event-item .time { color: var(--muted); min-width: 70px; }
+  .event-item .etype { color: var(--accent2); min-width: 120px; font-weight: 600; }
+  .event-item .detail { color: var(--text); flex: 1; }
+
+  /* -- Task submission -- */
+  .task-panel { grid-column: 3; grid-row: 2 / 4; }
+  .task-form { padding: 12px; display: flex; flex-direction: column; gap: 10px; }
+  .task-form textarea {
+    background: var(--bg);
+    color: var(--text);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 10px;
+    font-family: var(--font);
+    font-size: 13px;
+    resize: vertical;
+    min-height: 120px;
+  }
+  .task-form textarea:focus {
+    outline: none;
+    border-color: var(--accent);
+    box-shadow: 0 0 0 2px rgba(0,212,255,0.15);
+  }
+
+  .file-drop {
+    border: 2px dashed var(--border);
+    border-radius: 6px;
+    padding: 20px;
+    text-align: center;
+    color: var(--muted);
+    cursor: pointer;
+    transition: all 0.2s;
+  }
+  .file-drop:hover, .file-drop.dragover {
+    border-color: var(--accent);
+    background: rgba(0,212,255,0.05);
+    color: var(--accent);
+  }
+  .file-drop input { display: none; }
+  .file-list { display: flex; flex-direction: column; gap: 4px; }
+  .file-item {
+    display: flex; justify-content: space-between; align-items: center;
+    padding: 4px 8px; background: var(--surface2); border-radius: 4px;
+    font-size: 11px;
+  }
+  .file-item .remove { color: var(--red); cursor: pointer; }
+
+  .btn {
+    padding: 10px 20px;
+    border: none;
+    border-radius: 6px;
+    font-family: var(--font);
+    font-size: 13px;
+    font-weight: 600;
+    cursor: pointer;
+    transition: all 0.2s;
+  }
+  .btn-primary {
+    background: var(--accent);
+    color: var(--bg);
+  }
+  .btn-primary:hover {
+    background: #33ddff;
+    box-shadow: 0 0 12px rgba(0,212,255,0.4);
+  }
+  .btn-secondary {
+    background: var(--surface2);
+    color: var(--text);
+    border: 1px solid var(--border);
+  }
+
+  /* -- Provider config -- */
+  .provider-form { padding: 8px; }
+  .provider-form select, .provider-form input {
+    background: var(--bg);
+    color: var(--text);
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    padding: 6px 8px;
+    font-family: var(--font);
+    font-size: 12px;
+    width: 100%;
+    margin-bottom: 6px;
+  }
+  .provider-form select:focus, .provider-form input:focus {
+    outline: none;
+    border-color: var(--accent);
+  }
+
+  /* -- Task list -- */
+  .task-item {
+    padding: 8px 10px;
+    border-bottom: 1px solid var(--border);
+    cursor: pointer;
+    transition: background 0.15s;
+  }
+  .task-item:hover { background: var(--surface2); }
+  .task-item .task-header {
+    display: flex; justify-content: space-between; align-items: center;
+  }
+  .task-item .task-id { color: var(--accent); font-weight: 600; font-size: 12px; }
+  .task-status {
+    padding: 2px 8px; border-radius: 10px; font-size: 10px;
+    font-weight: 600; text-transform: uppercase;
+  }
+  .task-status.pending { background: rgba(245,158,11,0.2); color: var(--amber); }
+  .task-status.running { background: rgba(0,212,255,0.2); color: var(--accent); }
+  .task-status.converged { background: rgba(16,185,129,0.2); color: var(--green); }
+  .task-text { color: var(--muted); font-size: 11px; margin-top: 4px; }
+
+  /* -- Scrollbar -- */
+  ::-webkit-scrollbar { width: 6px; }
+  ::-webkit-scrollbar-track { background: var(--surface); }
+  ::-webkit-scrollbar-thumb { background: var(--border); border-radius: 3px; }
+  ::-webkit-scrollbar-thumb:hover { background: var(--muted); }
+
+  /* -- Modal for task detail -- */
+  .modal-overlay {
+    display: none;
+    position: fixed; inset: 0;
+    background: rgba(0,0,0,0.7);
+    z-index: 100;
+    justify-content: center;
+    align-items: center;
+  }
+  .modal-overlay.active { display: flex; }
+  .modal {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    width: 700px;
+    max-height: 80vh;
+    overflow-y: auto;
+    padding: 24px;
+  }
+  .modal h2 { color: var(--accent); margin-bottom: 12px; font-size: 16px; }
+  .modal .close-btn {
+    float: right; cursor: pointer; color: var(--muted);
+    font-size: 20px; line-height: 1;
+  }
+  .modal .close-btn:hover { color: var(--red); }
+  .modal pre {
+    background: var(--bg);
+    padding: 12px;
+    border-radius: 6px;
+    font-size: 12px;
+    overflow-x: auto;
+    white-space: pre-wrap;
+    word-break: break-all;
+  }
+</style>
+</head>
+<body>
+
+<div class="header">
+  <h1>SYNAPSE BRAIN -- COMMAND CENTER</h1>
+  <div class="status">
+    <span><span class="status-dot" id="ws-status"></span><span id="ws-label">connecting</span></span>
+    <span style="color:var(--muted)">uptime: <span id="uptime">0s</span></span>
+  </div>
+</div>
+
+<div class="grid">
+  <!-- Stats row -->
+  <div class="stats-row">
+    <div class="stat-card"><div class="value" id="s-spores">0</div><div class="label">Spores</div></div>
+    <div class="stat-card"><div class="value" id="s-active">0</div><div class="label">Active</div></div>
+    <div class="stat-card"><div class="value" id="s-tasks">0</div><div class="label">Tasks</div></div>
+    <div class="stat-card"><div class="value" id="s-converged">0</div><div class="label">Converged</div></div>
+    <div class="stat-card"><div class="value" id="s-deltas">0</div><div class="label">Deltas</div></div>
+    <div class="stat-card"><div class="value" id="s-latency">0</div><div class="label">Avg Latency ms</div></div>
+  </div>
+
+  <!-- Topology map -->
+  <div class="panel" style="grid-column: 1 / 3;">
+    <div class="panel-header">
+      <span>Swarm Topology</span>
+      <span id="topo-count" style="color:var(--accent)">0 nodes</span>
+    </div>
+    <div class="panel-body" style="padding:0; position:relative;">
+      <canvas id="topology-canvas"></canvas>
+    </div>
+  </div>
+
+  <!-- Task submission + task list -->
+  <div class="panel task-panel">
+    <div class="panel-header">Submit Task</div>
+    <div class="panel-body" style="padding:0;">
+      <div class="task-form" id="task-form">
+        <textarea id="task-input" placeholder="Describe the task for the swarm to solve..."></textarea>
+
+        <div class="file-drop" id="file-drop">
+          Drop documents here or click to upload
+          <input type="file" id="file-input" multiple>
+        </div>
+        <div class="file-list" id="file-list"></div>
+
+        <div style="display:flex;gap:8px;">
+          <button class="btn btn-primary" style="flex:1" onclick="submitTask()">Deploy to Swarm</button>
+          <button class="btn btn-secondary" onclick="clearForm()">Clear</button>
+        </div>
+      </div>
+
+      <div class="panel-header" style="margin-top:8px;">
+        <span>Tasks</span>
+        <span id="task-count" style="color:var(--accent)">0</span>
+      </div>
+      <div id="task-list" style="flex:1;overflow-y:auto;"></div>
+    </div>
+  </div>
+
+  <!-- Spore list -->
+  <div class="panel">
+    <div class="panel-header">
+      <span>Spores</span>
+      <span id="spore-list-count" style="color:var(--accent)">0</span>
+    </div>
+    <div class="panel-body" style="padding:0;" id="spore-list"></div>
+  </div>
+
+  <!-- Event log + Provider config -->
+  <div class="panel">
+    <div class="panel-header">
+      <span>Event Log</span>
+      <span id="event-count" style="color:var(--muted)">0</span>
+    </div>
+    <div class="panel-body" style="padding:0;" id="event-log"></div>
+
+    <div class="panel-header">Provider Config</div>
+    <div class="panel-body" style="padding:0;">
+      <div class="provider-form">
+        <select id="provider-preset">
+          <option value="">-- select provider --</option>
+          <option value="groq">Groq (free tier)</option>
+          <option value="openrouter">OpenRouter</option>
+          <option value="glm">GLM / Zhipu AI</option>
+          <option value="mistral">Mistral (free)</option>
+          <option value="sambanova">SambaNova (free)</option>
+          <option value="cerebras">Cerebras (free)</option>
+          <option value="together">Together AI</option>
+          <option value="ollama">Ollama (local)</option>
+          <option value="custom">Custom endpoint</option>
+        </select>
+        <input id="provider-key" type="password" placeholder="API key">
+        <input id="provider-model" type="text" placeholder="Model name (e.g. glm-4-flash)">
+        <input id="provider-url" type="text" placeholder="Base URL (auto-filled for presets)">
+        <button class="btn btn-primary" style="width:100%;margin-top:4px;" onclick="saveProvider()">Save Provider</button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- Task detail modal -->
+<div class="modal-overlay" id="task-modal">
+  <div class="modal">
+    <span class="close-btn" onclick="closeModal()">&times;</span>
+    <h2 id="modal-title">Task Detail</h2>
+    <div id="modal-body"></div>
+  </div>
+</div>
+
+<script>
+// ----- State -----
+let ws = null;
+let spores = [];
+let tasks = [];
+let events = [];
+let uploadedFiles = [];
+
+// ----- Provider presets -----
+const PRESETS = {
+  groq:      { name: 'Groq',         base_url: 'https://api.groq.com/openai/v1',          model: 'llama-3.3-70b-versatile' },
+  openrouter:{ name: 'OpenRouter',    base_url: 'https://openrouter.ai/api/v1',            model: 'meta-llama/llama-3.3-70b-instruct:free' },
+  glm:       { name: 'GLM / Zhipu',   base_url: 'https://open.bigmodel.cn/api/paas/v4',   model: 'glm-4-flash' },
+  mistral:   { name: 'Mistral',       base_url: 'https://api.mistral.ai/v1',               model: 'mistral-small-latest' },
+  sambanova: { name: 'SambaNova',     base_url: 'https://api.sambanova.ai/v1',             model: 'Meta-Llama-3.3-70B-Instruct' },
+  cerebras:  { name: 'Cerebras',      base_url: 'https://api.cerebras.ai/v1',              model: 'llama-3.3-70b' },
+  together:  { name: 'Together AI',   base_url: 'https://api.together.xyz/v1',             model: 'meta-llama/Meta-Llama-3.1-70B-Instruct-Turbo' },
+  ollama:    { name: 'Ollama (local)', base_url: 'http://localhost:11434/v1',               model: 'llama3.2' },
+  custom:    { name: 'Custom',         base_url: '',                                        model: '' },
+};
+
+document.getElementById('provider-preset').addEventListener('change', (e) => {
+  const preset = PRESETS[e.target.value];
+  if (preset) {
+    document.getElementById('provider-url').value = preset.base_url;
+    document.getElementById('provider-model').value = preset.model;
+  }
+});
+
+// ----- WebSocket -----
+function connectWS() {
+  const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
+  ws = new WebSocket(`${proto}//${location.host}/ws`);
+
+  ws.onopen = () => {
+    document.getElementById('ws-status').className = 'status-dot live';
+    document.getElementById('ws-label').textContent = 'connected';
+  };
+
+  ws.onclose = () => {
+    document.getElementById('ws-status').className = 'status-dot dead';
+    document.getElementById('ws-label').textContent = 'disconnected';
+    setTimeout(connectWS, 3000);
+  };
+
+  ws.onmessage = (evt) => {
+    const data = JSON.parse(evt.data);
+    if (data.type === 'snapshot') {
+      updateStats(data.data);
+      spores = data.spores || [];
+      tasks = data.tasks || [];
+      renderSpores();
+      renderTasks();
+      renderTopology();
+    } else {
+      handleEvent(data);
+    }
+  };
+}
+
+function handleEvent(evt) {
+  events.unshift(evt);
+  if (events.length > 500) events = events.slice(0, 250);
+  renderEvent(evt);
+
+  if (evt.type === 'spore_registered' || evt.type === 'spore_stale') {
+    fetchSpores();
+  }
+  if (evt.type === 'task_submitted' || evt.type === 'task_dispatched' || evt.type === 'task_converged') {
+    fetchTasks();
+  }
+  fetchStats();
+}
+
+function renderEvent(evt) {
+  const log = document.getElementById('event-log');
+  const el = document.createElement('div');
+  el.className = 'event-item';
+  const t = evt.timestamp ? new Date(evt.timestamp * 1000).toLocaleTimeString() : '--';
+  el.innerHTML = `<span class="time">${t}</span><span class="etype">${evt.type}</span><span class="detail">${evt.spore_id || evt.task_id || ''} ${evt.content_preview || ''}</span>`;
+  log.prepend(el);
+  document.getElementById('event-count').textContent = events.length;
+}
+
+// ----- Fetchers -----
+async function fetchStats() {
+  try {
+    const r = await fetch('/api/summary');
+    const d = await r.json();
+    updateStats(d);
+  } catch {}
+}
+
+function updateStats(d) {
+  document.getElementById('s-spores').textContent = d.total_spores || 0;
+  document.getElementById('s-active').textContent = d.active_spores || 0;
+  document.getElementById('s-tasks').textContent = d.total_tasks || 0;
+  document.getElementById('s-converged').textContent = d.completed_tasks || 0;
+  document.getElementById('s-deltas').textContent = d.total_deltas || 0;
+  document.getElementById('s-latency').textContent = d.avg_latency_ms || 0;
+  const up = d.uptime_s || 0;
+  const h = Math.floor(up/3600); const m = Math.floor((up%3600)/60);
+  document.getElementById('uptime').textContent = h > 0 ? `${h}h ${m}m` : `${m}m`;
+}
+
+async function fetchSpores() {
+  try {
+    const r = await fetch('/api/spores');
+    spores = await r.json();
+    renderSpores();
+    renderTopology();
+  } catch {}
+}
+
+async function fetchTasks() {
+  try {
+    const r = await fetch('/api/tasks');
+    tasks = await r.json();
+    renderTasks();
+  } catch {}
+}
+
+// ----- Renderers -----
+function renderSpores() {
+  const el = document.getElementById('spore-list');
+  el.innerHTML = '';
+  document.getElementById('spore-list-count').textContent = spores.length;
+  for (const s of spores) {
+    const trust = s.trust_score || 0;
+    const tc = trust >= 0.7 ? 'trust-high' : trust >= 0.4 ? 'trust-mid' : 'trust-low';
+    const dot = s.status === 'active' ? 'live' : 'dead';
+    const d = document.createElement('div');
+    d.className = 'spore-item';
+    d.innerHTML = `<span class="status-dot ${dot}"></span><span class="id">${s.spore_id}</span><span class="host">${s.host || 'unknown'}</span><span class="trust ${tc}">${(trust*100).toFixed(0)}%</span><span class="latency">${s.latency_ms || 0}ms</span>`;
+    el.appendChild(d);
+  }
+}
+
+function renderTasks() {
+  const el = document.getElementById('task-list');
+  el.innerHTML = '';
+  document.getElementById('task-count').textContent = tasks.length;
+  for (const t of tasks) {
+    const d = document.createElement('div');
+    d.className = 'task-item';
+    d.onclick = () => showTaskDetail(t);
+    d.innerHTML = `<div class="task-header"><span class="task-id">${t.task_id}</span><span class="task-status ${t.status}">${t.status}</span></div><div class="task-text">${(t.text||'').slice(0,80)}</div>`;
+    el.appendChild(d);
+  }
+}
+
+// ----- Topology canvas -----
+function renderTopology() {
+  const canvas = document.getElementById('topology-canvas');
+  const parent = canvas.parentElement;
+  canvas.width = parent.clientWidth;
+  canvas.height = parent.clientHeight;
+  const ctx = canvas.getContext('2d');
+  ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+  const n = spores.length;
+  document.getElementById('topo-count').textContent = `${n} nodes`;
+  if (n === 0) {
+    ctx.fillStyle = '#64748b';
+    ctx.font = '14px monospace';
+    ctx.textAlign = 'center';
+    ctx.fillText('No spores connected. Deploy agents to see the swarm.', canvas.width/2, canvas.height/2);
+    return;
+  }
+
+  const cx = canvas.width / 2;
+  const cy = canvas.height / 2;
+  const radius = Math.min(cx, cy) * 0.7;
+
+  // Calculate positions
+  const positions = spores.map((s, i) => {
+    const angle = (2 * Math.PI * i / n) - Math.PI/2;
+    return { x: cx + radius * Math.cos(angle), y: cy + radius * Math.sin(angle), spore: s };
+  });
+
+  // Draw connections (mesh)
+  ctx.strokeStyle = 'rgba(0,212,255,0.1)';
+  ctx.lineWidth = 1;
+  for (let i = 0; i < positions.length; i++) {
+    for (let j = i+1; j < positions.length; j++) {
+      ctx.beginPath();
+      ctx.moveTo(positions[i].x, positions[i].y);
+      ctx.lineTo(positions[j].x, positions[j].y);
+      ctx.stroke();
+    }
+  }
+
+  // Draw nodes
+  for (const p of positions) {
+    const active = p.spore.status === 'active';
+    const trust = p.spore.trust_score || 0;
+    const nodeRadius = 8 + trust * 8;
+
+    // Glow
+    if (active) {
+      const grad = ctx.createRadialGradient(p.x, p.y, 0, p.x, p.y, nodeRadius*3);
+      grad.addColorStop(0, 'rgba(0,212,255,0.3)');
+      grad.addColorStop(1, 'rgba(0,212,255,0)');
+      ctx.fillStyle = grad;
+      ctx.beginPath();
+      ctx.arc(p.x, p.y, nodeRadius*3, 0, Math.PI*2);
+      ctx.fill();
+    }
+
+    // Node
+    ctx.fillStyle = active ? '#00d4ff' : '#ef4444';
+    ctx.beginPath();
+    ctx.arc(p.x, p.y, nodeRadius, 0, Math.PI*2);
+    ctx.fill();
+
+    // Label
+    ctx.fillStyle = '#e2e8f0';
+    ctx.font = '10px monospace';
+    ctx.textAlign = 'center';
+    ctx.fillText(p.spore.spore_id, p.x, p.y + nodeRadius + 14);
+  }
+
+  // Center hub
+  ctx.fillStyle = 'rgba(124,58,237,0.5)';
+  ctx.beginPath();
+  ctx.arc(cx, cy, 12, 0, Math.PI*2);
+  ctx.fill();
+  ctx.fillStyle = '#7c3aed';
+  ctx.beginPath();
+  ctx.arc(cx, cy, 6, 0, Math.PI*2);
+  ctx.fill();
+}
+
+window.addEventListener('resize', renderTopology);
+
+// ----- File upload -----
+const fileDrop = document.getElementById('file-drop');
+const fileInput = document.getElementById('file-input');
+
+fileDrop.addEventListener('click', () => fileInput.click());
+fileDrop.addEventListener('dragover', (e) => { e.preventDefault(); fileDrop.classList.add('dragover'); });
+fileDrop.addEventListener('dragleave', () => fileDrop.classList.remove('dragover'));
+fileDrop.addEventListener('drop', (e) => {
+  e.preventDefault();
+  fileDrop.classList.remove('dragover');
+  addFiles(e.dataTransfer.files);
+});
+fileInput.addEventListener('change', () => addFiles(fileInput.files));
+
+function addFiles(files) {
+  for (const f of files) uploadedFiles.push(f);
+  renderFiles();
+}
+
+function renderFiles() {
+  const el = document.getElementById('file-list');
+  el.innerHTML = '';
+  uploadedFiles.forEach((f, i) => {
+    const d = document.createElement('div');
+    d.className = 'file-item';
+    const size = f.size > 1048576 ? `${(f.size/1048576).toFixed(1)}MB` : `${(f.size/1024).toFixed(0)}KB`;
+    d.innerHTML = `<span>${f.name} (${size})</span><span class="remove" onclick="removeFile(${i})">x</span>`;
+    el.appendChild(d);
+  });
+}
+
+function removeFile(i) {
+  uploadedFiles.splice(i, 1);
+  renderFiles();
+}
+
+// ----- Task submission -----
+async function submitTask() {
+  const text = document.getElementById('task-input').value.trim();
+  if (!text) return;
+
+  const form = new FormData();
+  form.append('task', text);
+  form.append('config', JSON.stringify({}));
+  for (const f of uploadedFiles) form.append('documents', f);
+
+  try {
+    const r = await fetch('/api/tasks', { method: 'POST', body: form });
+    const d = await r.json();
+    if (d.task_id) clearForm();
+  } catch(e) {
+    console.error('submit failed', e);
+  }
+}
+
+function clearForm() {
+  document.getElementById('task-input').value = '';
+  uploadedFiles = [];
+  renderFiles();
+}
+
+// ----- Provider save -----
+async function saveProvider() {
+  const preset = document.getElementById('provider-preset').value;
+  const p = PRESETS[preset] || {};
+  const body = {
+    name: p.name || 'custom',
+    api_key: document.getElementById('provider-key').value,
+    model: document.getElementById('provider-model').value || p.model,
+    base_url: document.getElementById('provider-url').value || p.base_url,
+  };
+  try {
+    await fetch('/api/providers', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify(body) });
+  } catch(e) { console.error(e); }
+}
+
+// ----- Task detail modal -----
+function showTaskDetail(task) {
+  document.getElementById('task-modal').classList.add('active');
+  document.getElementById('modal-title').textContent = task.task_id;
+  let html = `<p><strong>Status:</strong> <span class="task-status ${task.status}">${task.status}</span></p>`;
+  html += `<p><strong>Input:</strong></p><pre>${task.text || '(empty)'}</pre>`;
+  if (task.attachments && task.attachments.length) {
+    html += `<p><strong>Attachments:</strong> ${task.attachments.map(a=>a.filename).join(', ')}</p>`;
+  }
+  if (task.deltas && task.deltas.length) {
+    html += `<p><strong>Deltas (${task.deltas.length}):</strong></p>`;
+    for (const d of task.deltas.slice(-10)) {
+      html += `<pre>${JSON.stringify(d, null, 2)}</pre>`;
+    }
+  }
+  if (task.result) {
+    html += `<p><strong>Converged Result:</strong></p><pre>${JSON.stringify(task.result, null, 2)}</pre>`;
+  }
+  document.getElementById('modal-body').innerHTML = html;
+}
+
+function closeModal() {
+  document.getElementById('task-modal').classList.remove('active');
+}
+
+document.getElementById('task-modal').addEventListener('click', (e) => {
+  if (e.target === e.currentTarget) closeModal();
+});
+
+// ----- Init -----
+connectWS();
+setInterval(fetchStats, 10000);
+setInterval(fetchSpores, 15000);
+</script>
+</body>
+</html>
