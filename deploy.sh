@@ -59,25 +59,36 @@ if [ ! -f "$CONFIG" ]; then
     read -rp "Count [3]: " COUNT
     COUNT="${COUNT:-3}"
 
-    # Optional: Z.ai key
+    # LLM provider keys (more = more resilient)
     echo ""
-    echo "Z.ai API key (optional, free at https://z.ai -- improves reliability):"
-    read -rp "Z.ai key [skip]: " ZAI_KEY
+    echo "LLM provider keys make your swarm more resilient."
+    echo "Each key is a separate fallback path. All are free tier."
+    echo "Press Enter to skip any you don't have."
+    echo ""
+
+    read -rp "xAI key (https://console.x.ai): " XAI_KEY
+    read -rp "Google AI key (https://aistudio.google.com): " GOOGLE_KEY
+    read -rp "Z.ai key (https://open.bigmodel.cn): " ZAI_KEY
+    read -rp "OpenRouter key (https://openrouter.ai): " OR_KEY
 
     # Write config
     cat > "$CONFIG" << YAML
 hf_token: "${HF_TOKEN}"
 count: ${COUNT}
 api_keys:
+  xai: "${XAI_KEY:-}"
+  google_ai: "${GOOGLE_KEY:-}"
   zai: "${ZAI_KEY:-}"
+  openrouter: "${OR_KEY:-}"
+  github_models: ""
+  llmapi: ""
   groq: ""
-  google_ai: ""
   cerebras: ""
 YAML
 
     echo ""
     echo "Config saved to config.yaml"
-    echo "You can edit it later to add more API keys."
+    echo "Edit it anytime to add more API keys for extra resilience."
 fi
 
 echo ""

@@ -99,7 +99,7 @@ def merge_config(args: argparse.Namespace) -> dict:
         api_keys["google_ai"] = args.google_key
     if args.cerebras_key:
         api_keys["cerebras"] = args.cerebras_key
-    if args.mistral_key:
+    if getattr(args, "mistral_key", None):
         api_keys["mistral"] = args.mistral_key
     cfg["api_keys"] = api_keys
 
@@ -107,9 +107,11 @@ def merge_config(args: argparse.Namespace) -> dict:
     if not cfg.get("hf_token"):
         cfg["hf_token"] = os.environ.get("HF_TOKEN", "")
     for env_key, cfg_key in [
-        ("ZAI_API_KEY", "zai"), ("GROQ_API_KEY", "groq"),
-        ("GOOGLE_AI_KEY", "google_ai"), ("CEREBRAS_API_KEY", "cerebras"),
-        ("MISTRAL_API_KEY", "mistral"),
+        ("XAI_API_KEY", "xai"), ("GOOGLE_AI_KEY", "google_ai"),
+        ("GITHUB_MODELS_TOKEN", "github_models"),
+        ("ZAI_API_KEY", "zai"), ("OPENROUTER_KEY", "openrouter"),
+        ("LLMAPI_KEY", "llmapi"), ("GROQ_API_KEY", "groq"),
+        ("CEREBRAS_API_KEY", "cerebras"),
     ]:
         if not api_keys.get(cfg_key) and os.environ.get(env_key):
             api_keys[cfg_key] = os.environ[env_key]
@@ -344,12 +346,14 @@ def main():
     # Build secrets -- ALL spores get ALL keys for maximum fallback
     secrets = {"HF_TOKEN": token}
     key_map = {
-        "zai": "ZAI_API_KEY",
-        "groq": "GROQ_API_KEY",
+        "xai": "XAI_API_KEY",
         "google_ai": "GOOGLE_AI_KEY",
+        "github_models": "GITHUB_MODELS_TOKEN",
+        "zai": "ZAI_API_KEY",
+        "openrouter": "OPENROUTER_KEY",
+        "llmapi": "LLMAPI_KEY",
+        "groq": "GROQ_API_KEY",
         "cerebras": "CEREBRAS_API_KEY",
-        "openrouter": "OPENROUTER_API_KEY",
-        "mistral": "MISTRAL_API_KEY",
     }
     for cfg_key, env_key in key_map.items():
         if api_keys.get(cfg_key):
