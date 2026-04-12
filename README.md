@@ -250,14 +250,72 @@ and converge on synthesized answers that no single model produces alone.
 - **MCP Server** -- every spore exposes 7 tools via Model Context Protocol for external integration
 - **Federation Protocol** -- Swarm DNA integrity verification, any crdt-merge node can join, modified nodes are rejected
 
-## What We Are Testing
+## What We Are Trying to Prove
 
-1. **Memory scaling** -- how many memories before retrieval degrades? Current: 7,500+ per spore with zero degradation.
-2. **Convergence quality** -- does answer quality improve with more diverse models? Current: 7 model families, consistent convergence.
-3. **Trust dynamics** -- how does the E4 trust lattice behave over time? Does trust distribution stabilize?
-4. **Swarm scaling** -- what happens at 20 nodes? 100? 1,000? The architecture is designed for it.
-5. **Cross-commander federation** -- multiple independent operators, connected via gossip. The viral intelligence loop.
-6. **Model diversity** -- what mix of models produces the highest quality convergence?
+This project started from a simple observation: most multi-agent systems
+coordinate through a central authority or a message queue. Both require
+synchronous communication, both have a single point of failure, and neither
+handles network partitions well. CRDTs handle all three of these problems
+natively -- they were designed for exactly this environment.
+
+We think CRDTs might be a better coordination primitive for multi-agent AI. Not
+for every use case, but for the specific case where you want independent agents
+to share reasoning without a central server, without synchronous communication,
+and without losing work when things go wrong.
+
+Here is what we are testing, in order of how confident we are:
+
+**1. Can CRDT-backed memory create compounding intelligence?**
+
+The early numbers are encouraging. The reference swarm has accumulated 7,500+
+memories per spore with no retrieval degradation so far. Spores that recall past
+reasoning during synthesis produce visibly richer answers than fresh spores on
+the same task. But we have not measured this rigorously. We need controlled
+experiments: a swarm with 1,000 tasks of accumulated memory versus a fresh swarm
+on the same test set. If memory genuinely compounds intelligence, the gap should
+be measurable. If it does not, the "never forgets" design needs rethinking.
+
+**2. Does model diversity improve collective reasoning?**
+
+The swarm runs 7 different LLM families. They reason independently, debate
+through structured cycles, and converge through trust-weighted synthesis. The
+intuition is that diverse training distributions produce diverse perspectives,
+and structured debate surfaces stronger answers than any single model alone.
+This is consistent with established ensemble theory, but we have not benchmarked
+it against the obvious baselines: single best model, majority voting,
+chain-of-thought on a single model. Until those comparisons exist, the claim is
+a hypothesis, not a result.
+
+**3. Does federated intelligence scale?**
+
+This is the big question and the hardest to answer alone. The architecture is
+designed so that every commander who joins makes the entire network smarter --
+their model contributions flow to everyone, their API quotas add to the
+aggregate capacity, their unique perspective enriches the collective. At 7
+spores across one operator, it works. At 20 nodes across 3 operators, we expect
+it to work. At 1,000 nodes across 100 operators, we genuinely do not know. Does
+quality improve linearly? Logarithmically? Does it plateau? Does trust dynamics
+change at scale? These are open empirical questions that only become answerable
+with more participants.
+
+**Why this matters if it works:**
+
+If CRDT coordination holds up at scale, it means multi-agent systems do not need
+central orchestrators. If memory compounding is real, it means swarms get
+meaningfully better with time, not just during active use. If diverse model
+federation improves reasoning quality, it means a network of free-tier models
+operated by independent people could collectively produce reasoning that no
+single model achieves alone.
+
+These are modest claims stated carefully. We are not there yet. The foundation
+works, the early results are interesting, and the architecture supports the
+experiments that would prove or disprove each one. What we need is more people
+running spores, more diverse models contributing, and more rigorous measurement
+of the results.
+
+If any of this interests you, the fastest way to help is to deploy a swarm and
+connect it. The second fastest way is to build evaluation harnesses that measure
+convergence quality rigorously.
 
 ## Deploy Anywhere
 
@@ -369,22 +427,15 @@ domains, different perspectives -- and none of it is ever forgotten?**
 
 ## Current Status
 
-The foundation works. The reference swarm runs continuously:
+A reference swarm of 7 spores across 6 LLM families runs continuously on
+HuggingFace Spaces. It has converged 54+ tasks, accumulated 7,500+ memories per
+spore, and maintained full gossip and trust convergence across all nodes. The
+Knowledge Wall, MCP server, Sentinel, and Cortex subsystems are all active.
 
-- 7 spores across 6 LLM families, 54+ converged tasks
-- 7,500+ memories per spore with no retrieval degradation
-- Knowledge Wall filtering active on every spore
-- MCP server exposing 7 tools per spore for external integration
-- Sentinel with local Cortex (Qwen3-4B) for autonomous operations
-- Full gossip mesh with trust-weighted synthesis
-
-What we want to learn:
-
-- Memory scaling ceiling (tested: ~7,500 per spore; theoretical: millions)
-- Optimal spore count and model mix for convergence quality
-- Trust dynamics at scale (current: 12 peers tracked)
-- Cross-commander federation behavior with independent operators
-- Real-world failure modes and recovery patterns
+This is a single-operator deployment. The numbers are real but small. What we
+do not yet have -- and what we need community help to generate -- is data from
+multiple independent operators running diverse configurations against
+measurable benchmarks.
 
 ## Dependencies
 
