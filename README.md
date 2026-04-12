@@ -6,14 +6,13 @@ trust-weighted synthesis.
 
 **The foundation is built. We want to see how far it scales.**
 
-```
+```bash
 git clone https://github.com/mgillr/synapse-brain.git
 cd synapse-brain
-cp config.template.yaml config.yaml   # edit with your API keys (or leave blank for free-tier)
-python launch_swarm.py --config config.yaml
+./deploy.sh
 ```
 
-Three commands. Your swarm is live.
+One command. Your swarm is live.
 
 ## What This Is
 
@@ -64,60 +63,108 @@ and converge on synthesized answers that no single model produces alone.
 
 ### What We Are Testing
 
-1. **Memory scaling** -- How many memories can a single spore hold before retrieval degrades? Current: 6,500+ per spore, 45,000+ aggregate across 7 nodes with no degradation.
+1. **Memory scaling** -- How many memories can a single spore hold before retrieval degrades? Current: 6,800+ per spore, 47,000+ aggregate with no degradation.
 2. **Convergence quality** -- Does answer quality improve with more diverse models? Current: 7 model families, consistent convergence within 3-5 cycles.
-3. **Trust dynamics** -- How does the E4 trust lattice behave over time? Does trust distribution stabilize? Current: 53 converged tasks, trust range 0.40-0.70.
+3. **Trust dynamics** -- How does the E4 trust lattice behave over time? Does trust distribution stabilize?
 4. **Swarm scaling** -- What happens at 20 nodes? 100? The architecture is designed for it but untested at scale.
 5. **Cross-commander federation** -- Multiple independent operators running their own swarms, connected via gossip. Untested in the wild.
 
 ## Quick Start
 
-### Option 1: Deploy on HuggingFace Spaces (free tier)
+### Option 1: One-command deploy (recommended)
+
+```bash
+git clone https://github.com/mgillr/synapse-brain.git
+cd synapse-brain
+./deploy.sh
+```
+
+The script walks you through setup interactively:
+- Asks for your HuggingFace token (free account works)
+- Asks how many spores (3 is a good start)
+- Optionally asks for API keys (all free tier)
+- Saves config and deploys
+
+Your swarm is live in under 2 minutes.
+
+### Option 2: Config file
 
 ```bash
 git clone https://github.com/mgillr/synapse-brain.git
 cd synapse-brain
 cp config.template.yaml config.yaml
-# Edit config.yaml -- at minimum set your HF token
-python launch_swarm.py --config config.yaml --count 3
+# Edit config.yaml with your HF token
+python launch_swarm.py --config config.yaml
 ```
 
-This deploys 3 spores as free HF Spaces. No GPU needed -- inference runs via
-free-tier LLM APIs.
+### Option 3: CLI flags
 
-### Option 2: Run locally
+```bash
+python launch_swarm.py --hf-token hf_xxx --count 3
+```
+
+### Option 4: Run locally
 
 ```bash
 pip install -r requirements.txt
 python spore.py  # single spore, local mode
 ```
 
-### Option 3: Join the existing swarm
+### Option 5: Join an existing swarm
 
-Edit `config.yaml` to point your spores at an existing swarm as peers. Your nodes will automatically discover and gossip with the
-network.
+Add peer URLs to your config.yaml. Your nodes will discover and gossip with
+the network automatically.
+
+```yaml
+peers:
+  - "https://some-swarm-synapse-spore-000.hf.space"
+  - "https://some-swarm-synapse-spore-001.hf.space"
+```
+
+## Deploying Anywhere
+
+Spores are standard Python web servers. They run on any platform that supports
+Python 3.10+ and exposes an HTTP port:
+
+| Platform | Cost | Notes |
+|---|---|---|
+| HuggingFace Spaces | Free | Default target. 2 vCPU, 16 GB RAM. |
+| Railway | Free tier | Set `PORT` env var. |
+| Fly.io | Free tier | Works with `Dockerfile`. |
+| Render | Free tier | Auto-detected from `requirements.txt`. |
+| Any VPS/server | Varies | `pip install -r requirements.txt && python spore.py` |
+| Docker | -- | `docker build . && docker run -p 7860:7860` |
+
+**Minimum requirements per spore:**
+- Python 3.10+
+- 2 GB RAM (4 GB if running Cortex/Sentinel)
+- HTTP port exposed (default: 7860)
+- Network access to peers
+
+**Environment variables:**
+- `HF_TOKEN` -- Required. HuggingFace token for model inference + gossip auth.
+- `ZAI_API_KEY` -- Optional. Z.ai free tier (recommended, most reliable).
+- `GROQ_API_KEY` -- Optional. Groq free tier.
+- `GOOGLE_AI_KEY` -- Optional. Google AI Studio free tier.
+- `CEREBRAS_API_KEY` -- Optional. Cerebras free tier.
 
 ## Configuration
 
 Copy `config.template.yaml` and edit:
 
 ```yaml
-# Minimum viable config -- just your HF token
+# Minimum: just your HF token
 hf_token: "hf_your_token_here"
 
-# Optional: add API keys for more model diversity
-# Leave blank to use free-tier providers only
+# Optional: number of spores (default 3)
+count: 3
+
+# Optional: API keys for more model diversity
 api_keys:
   zai: ""          # Z.ai (GLM-4.7-Flash, free)
   groq: ""         # Groq (Llama, free tier)
   google_ai: ""    # Google AI Studio (Gemini, free tier)
   cerebras: ""     # Cerebras (fast inference, free tier)
-
-# Swarm size (default: 3)
-count: 3
-
-# Your identity as a commander
-commander: "your-username"
 ```
 
 On first launch, the swarm will:
@@ -126,8 +173,8 @@ On first launch, the swarm will:
 3. Connect to the gossip mesh
 4. Start reasoning
 
-If no API keys are provided, spores fall back to free-tier providers
-(HF Router, Z.ai free models). You can add keys later -- spores pick
+If no API keys are provided, spores use free-tier providers
+(HF Router, Z.ai free models). Add keys later -- spores pick
 them up on restart.
 
 ## Project Structure
@@ -140,12 +187,46 @@ synapse-brain/
   mcp_server.py         # MCP tool server (7 tools per spore)
   federation.py         # Federation join/gossip protocol
   launch_swarm.py       # Deployment script
+  deploy.sh             # One-command interactive launcher
   config.template.yaml  # Configuration template
   requirements.txt      # Dependencies
   command-center/       # Monitoring dashboard (Gradio)
   docs/                 # Architecture documentation
   tests/                # Test suite
 ```
+
+## API Endpoints
+
+Every spore exposes these endpoints:
+
+| Endpoint | Method | Description |
+|---|---|---|
+| `/api/health` | GET | Full health snapshot (memories, cycles, peers) |
+| `/api/task` | POST | Submit a reasoning task (`{"task": "..."}`) |
+| `/api/tasks` | GET | List all tasks with status |
+| `/api/task/{id}` | GET | Task detail with all deltas and convergence |
+| `/api/memory` | GET | Memory stats and vector clock |
+| `/api/trust` | GET | Trust lattice state |
+| `/api/wall` | GET | Knowledge Wall stats (crossings, blocks) |
+| `/api/federation/status` | GET | Federation state and DNA hash |
+| `/api/cortex` | GET | Cortex micro-LLM status (Sentinel only) |
+| `/mcp` | POST | MCP protocol endpoint (7 tools) |
+| `/mcp/info` | GET | List available MCP tools |
+| `/federation/join` | POST | Join the federation |
+| `/federation/nodes` | GET | List known federation nodes |
+
+## MCP Integration
+
+Every spore is an MCP server. Connect any MCP client (Claude, Cursor, or
+custom agents) to `<spore-url>/mcp` to use these tools:
+
+- `submit_task` -- Submit reasoning tasks to the swarm
+- `query_memory` -- Semantic search over CRDT memory
+- `get_trust` -- Query trust lattice for any peer
+- `swarm_health` -- Full health snapshot
+- `get_task` -- Detailed task state and convergence
+- `list_tasks` -- All tasks with status
+- `collective_knowledge` -- Query the collective intelligence layer
 
 ## How to Contribute
 
@@ -162,12 +243,11 @@ See [CONTRIBUTING.md](CONTRIBUTING.md) for details. The short version:
 
 This is experimental software. The foundation works:
 
-- 7-spore swarm has been running continuously with 53+ converged tasks
-- 6,500+ memories per spore with no retrieval degradation
-- Trust lattice stabilizing around 0.40-0.70 range
+- 7-spore swarm tested continuously with 54+ converged tasks
+- 6,800+ memories per spore with no retrieval degradation
 - Knowledge Wall filtering correctly (crossings vs blocks tracked)
 - MCP server exposing 7 tools per spore for external integration
-- Sentinel with local Cortex (Qwen3-4B) for autonomous code deployment
+- Sentinel with local Cortex (Qwen3-4B) for autonomous operations
 
 What we do not know yet:
 
@@ -189,5 +269,4 @@ What we do not know yet:
 
 MIT License. See [LICENSE](LICENSE) for details.
 
-Uses [crdt-merge](https://pypi.org/project/crdt-merge/) as a dependency
-(separately licensed).
+Uses [crdt-merge](https://pypi.org/project/crdt-merge/) as a dependency (separately licensed).

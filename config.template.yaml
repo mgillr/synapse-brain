@@ -1,76 +1,53 @@
-# Synapse Brain -- Commander Configuration
-# Copy this file to config.yaml and edit before launching.
+# Synapse Brain -- Configuration
 #
-# Required: HuggingFace token (for deploying Spaces and gossip auth)
-# Optional: API keys for additional LLM providers
+# Copy to config.yaml and fill in your HuggingFace token.
+# Everything else is optional.
 #
-# Spores fall back to free-tier providers if no keys are set.
-# You can always add keys later -- spores pick them up on restart.
+#   cp config.template.yaml config.yaml
+#   python launch_swarm.py --config config.yaml
 
 # --- REQUIRED ---
 
-# Your HuggingFace token (read+write access)
+# HuggingFace token (free account works, read+write access)
 # Get one at: https://huggingface.co/settings/tokens
 hf_token: ""
 
-# --- OPTIONAL: API Keys ---
-# Leave blank to use free-tier only.
-# Each key unlocks additional model families for diversity.
+# --- OPTIONAL ---
 
-api_keys:
-  # Z.ai -- GLM-4.7-Flash and GLM-4.5-Flash (free)
-  # Get one at: https://z.ai
-  zai: ""
-
-  # Groq -- Llama, Mixtral, Gemma (generous free tier)
-  # Get one at: https://console.groq.com
-  groq: ""
-
-  # Google AI Studio -- Gemini models (free tier)
-  # Get one at: https://aistudio.google.com
-  google_ai: ""
-
-  # Cerebras -- fast inference (free tier)
-  # Get one at: https://cloud.cerebras.ai
-  cerebras: ""
-
-# --- DEPLOYMENT ---
-
-# Number of spores to deploy (default: 3)
-# More spores = more model diversity = better convergence
-# Free HF accounts can run multiple Spaces
+# Number of spores (default: 3)
+# 3 = good starting point, 7 = full model diversity
 count: 3
 
-# Your commander identity (shown in the swarm topology)
-commander: ""
+# API keys for LLM providers (all optional, all have free tiers)
+# Each key adds model diversity. No keys = free-tier only.
+api_keys:
+  zai: ""          # Z.ai -- GLM-4.7-Flash (free, recommended)
+  groq: ""         # Groq -- Llama, Mixtral (free tier)
+  google_ai: ""    # Google AI Studio -- Gemini (free tier)
+  cerebras: ""     # Cerebras -- fast inference (free tier)
 
-# HuggingFace org to deploy under (optional, defaults to your username)
+# Your HF username or org (auto-detected from token if blank)
 hf_owner: ""
 
-# --- SWARM PEERS ---
-# Core swarm peers for initial gossip mesh connection.
-# Your spores will discover additional peers through gossip.
-# Replace with the URLs of the swarm you want to join.
+# Space name prefix (default: synapse-spore)
+prefix: "synapse-spore"
 
-peers:
-  - "https://<your-prefix>-synapse-spore-000.hf.space"
-  - "https://<your-prefix>-synapse-spore-001.hf.space"
-  - "https://<your-prefix>-synapse-spore-002.hf.space"
-  - "https://<your-prefix>-synapse-spore-003.hf.space"
-  - "https://<your-prefix>-synapse-spore-004.hf.space"
-  - "https://<your-prefix>-synapse-spore-005.hf.space"
-  - "https://<your-prefix>-synapse-spore-006.hf.space"
+# --- JOINING AN EXISTING SWARM ---
+
+# To connect your spores to an existing swarm, add peer URLs.
+# Your nodes will discover the rest of the network via gossip.
+# Leave empty to run a standalone swarm.
+peers: []
+#  - "https://some-swarm-synapse-spore-000.hf.space"
+#  - "https://some-swarm-synapse-spore-001.hf.space"
 
 # --- ADVANCED ---
 
-# Enable Sentinel (autonomous code deployment) on one of your spores
-# Only enable if you trust the swarm consensus process
+# Create Spaces as private (default: true)
+private: true
+
+# Enable Sentinel on last spore (autonomous code deployment)
 sentinel: false
 
-# Enable local Cortex micro-LLM (Qwen3-4B) on Sentinel
-# Requires ~5.8 GB RAM on the Space
+# Enable local Cortex micro-LLM on Sentinel
 cortex: false
-
-# Private mode -- your spores gossip with peers but do not accept
-# federation join requests from unknown nodes
-private: false

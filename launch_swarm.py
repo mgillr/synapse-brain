@@ -1,16 +1,19 @@
 #!/usr/bin/env python3
-"""Launch a Synapse Brain swarm on HuggingFace Private Spaces.
+"""Launch a Synapse Brain swarm on HuggingFace Spaces.
 
-Creates N private Spaces, each running a spore that:
-  - Reasons via free-tier LLM providers (Groq, Google, Cerebras, Mistral, etc.)
-  - Routes complex tasks to GLM-5.1 via Z.ai API when available
-  - Falls back to free providers if GLM-5.1 is unavailable
-  - Gossips with peers via HTTP mesh
-  - Reports status via Gradio UI on port 7860
+Creates N Spaces, each running a spore with a different LLM family.
+Spores gossip via HTTP mesh, accumulate CRDT memory, and converge
+on synthesized answers through structured debate.
 
 Usage:
-    python launch_swarm.py --count 5 --hf-token hf_xxx
-    python launch_swarm.py --count 10 --hf-token hf_xxx --zai-key sk-xxx
+    # From config file (recommended):
+    python launch_swarm.py --config config.yaml
+
+    # From CLI args:
+    python launch_swarm.py --hf-token hf_xxx --count 3
+
+    # Mix both (CLI overrides config):
+    python launch_swarm.py --config config.yaml --count 5
 """
 
 from __future__ import annotations
@@ -21,48 +24,133 @@ import json
 import os
 import subprocess
 import sys
-import tempfile
 import time
 from pathlib import Path
 
 try:
-    from huggingface_hub import HfApi, create_repo
+    from huggingface_hub import HfApi
 except ImportError:
     print("Installing huggingface_hub...")
     subprocess.check_call([sys.executable, "-m", "pip", "install", "-q", "huggingface_hub"])
-    from huggingface_hub import HfApi, create_repo
+    from huggingface_hub import HfApi
+
+try:
+    import yaml
+except ImportError:
+    subprocess.check_call([sys.executable, "-m", "pip", "install", "-q", "pyyaml"])
+    import yaml
 
 
 def parse_args() -> argparse.Namespace:
-    p = argparse.ArgumentParser(description="Launch Synapse Brain swarm on HF Spaces")
-    p.add_argument("--count", type=int, default=7, help="Number of spores to deploy")
-    p.add_argument("--hf-token", required=True, help="HuggingFace token (Pro account)")
-    p.add_argument("--hf-owner", default=None, help="HF username or org (auto-detected if omitted)")
-    p.add_argument("--prefix", default="synapse-spore", help="Space name prefix")
-    p.add_argument("--private", action="store_true", default=True, help="Create as private (default)")
-    p.add_argument("--public", action="store_true", help="Create as public")
-    p.add_argument("--zai-key", default="", help="Z.ai API key for GLM-5.1 brain tier")
-    p.add_argument("--groq-key", default="", help="Groq API key")
-    p.add_argument("--google-key", default="", help="Google AI Studio key")
-    p.add_argument("--cerebras-key", default="", help="Cerebras API key")
-    p.add_argument("--mistral-key", default="", help="Mistral API key")
-    p.add_argument("--dry-run", action="store_true", help="Generate files but don't push")
+    p = argparse.ArgumentParser(description="Launch Synapse Brain swarm")
+    p.add_argument("--config", type=str, help="Path to config.yaml")
+    p.add_argument("--count", type=int, help="Number of spores (default: 3)")
+    p.add_argument("--hf-token", type=str, help="HuggingFace token")
+    p.add_argument("--hf-owner", type=str, help="HF username or org")
+    p.add_argument("--prefix", type=str, help="Space name prefix")
+    p.add_argument("--private", action="store_true", default=None)
+    p.add_argument("--public", action="store_true")
+    p.add_argument("--zai-key", type=str, help="Z.ai API key")
+    p.add_argument("--groq-key", type=str, help="Groq API key")
+    p.add_argument("--google-key", type=str, help="Google AI Studio key")
+    p.add_argument("--cerebras-key", type=str, help="Cerebras API key")
+    p.add_argument("--mistral-key", type=str, help="Mistral API key")
+    p.add_argument("--peers", type=str, nargs="*", help="Peer URLs to join")
+    p.add_argument("--dry-run", action="store_true")
     return p.parse_args()
 
 
+def load_config(path: str) -> dict:
+    """Load YAML config file."""
+    with open(path) as f:
+        cfg = yaml.safe_load(f) or {}
+    return cfg
+
+
+def merge_config(args: argparse.Namespace) -> dict:
+    """Merge config file + CLI args + env vars. CLI wins over config."""
+    cfg = {}
+
+    # Load config file first
+    if args.config:
+        cfg = load_config(args.config)
+
+    # CLI overrides
+    if args.hf_token:
+        cfg["hf_token"] = args.hf_token
+    if args.count is not None:
+        cfg["count"] = args.count
+    if args.hf_owner:
+        cfg["hf_owner"] = args.hf_owner
+    if args.prefix:
+        cfg["prefix"] = args.prefix
+    if args.public:
+        cfg["private"] = False
+    if args.peers:
+        cfg["peers"] = args.peers
+
+    # API keys from CLI
+    api_keys = cfg.get("api_keys", {})
+    if args.zai_key:
+        api_keys["zai"] = args.zai_key
+    if args.groq_key:
+        api_keys["groq"] = args.groq_key
+    if args.google_key:
+        api_keys["google_ai"] = args.google_key
+    if args.cerebras_key:
+        api_keys["cerebras"] = args.cerebras_key
+    if args.mistral_key:
+        api_keys["mistral"] = args.mistral_key
+    cfg["api_keys"] = api_keys
+
+    # Environment fallbacks
+    if not cfg.get("hf_token"):
+        cfg["hf_token"] = os.environ.get("HF_TOKEN", "")
+    for env_key, cfg_key in [
+        ("ZAI_API_KEY", "zai"), ("GROQ_API_KEY", "groq"),
+        ("GOOGLE_AI_KEY", "google_ai"), ("CEREBRAS_API_KEY", "cerebras"),
+        ("MISTRAL_API_KEY", "mistral"),
+    ]:
+        if not api_keys.get(cfg_key) and os.environ.get(env_key):
+            api_keys[cfg_key] = os.environ[env_key]
+
+    # Defaults
+    cfg.setdefault("count", 3)
+    cfg.setdefault("prefix", "synapse-spore")
+    cfg.setdefault("private", True)
+    cfg.setdefault("sentinel", False)
+    cfg.setdefault("cortex", False)
+    cfg["dry_run"] = args.dry_run
+
+    return cfg
+
+
+def validate_config(cfg: dict) -> bool:
+    """Check required fields and print helpful messages."""
+    if not cfg.get("hf_token"):
+        print("ERROR: No HuggingFace token provided.")
+        print("")
+        print("Set it in one of these ways:")
+        print("  1. In config.yaml:  hf_token: \"hf_your_token\"")
+        print("  2. CLI flag:        --hf-token hf_your_token")
+        print("  3. Environment:     export HF_TOKEN=hf_your_token")
+        print("")
+        print("Get a token at: https://huggingface.co/settings/tokens")
+        return False
+    return True
+
+
 def get_hf_api(token: str) -> HfApi:
-    """Create an HfApi instance."""
     return HfApi(token=token)
 
 
 def get_hf_username(token: str) -> str:
-    """Get the HF username from the token."""
     api = get_hf_api(token)
-    return api.whoami()["name"]
+    info = api.whoami()
+    return info.get("name", "unknown")
 
 
 def create_space_repo(owner: str, name: str, token: str, private: bool = True) -> str:
-    """Create a new HF Space repo. Returns the repo URL."""
     api = get_hf_api(token)
     repo_id = f"{owner}/{name}"
     try:
@@ -73,15 +161,14 @@ def create_space_repo(owner: str, name: str, token: str, private: bool = True) -
             private=private,
             exist_ok=True,
         )
-        print(f"  Created Space: {url}")
+        print(f"  Created: {url}")
         return str(url)
     except Exception as e:
-        print(f"  Warning creating {repo_id}: {e}")
+        print(f"  Warning: {e}")
         return f"https://huggingface.co/spaces/{repo_id}"
 
 
 def set_space_secrets(owner: str, name: str, token: str, secrets: dict[str, str]):
-    """Set environment secrets on a Space."""
     api = get_hf_api(token)
     repo_id = f"{owner}/{name}"
     for key, value in secrets.items():
@@ -89,25 +176,22 @@ def set_space_secrets(owner: str, name: str, token: str, secrets: dict[str, str]
             continue
         try:
             api.add_space_secret(repo_id=repo_id, key=key, value=value)
-            print(f"  Set secret {key}")
         except Exception as e:
-            print(f"  Warning: failed to set secret {key}: {e}")
+            print(f"  Warning: secret {key}: {e}")
 
 
-# Model diversity: each spore gets a different primary model from a different family.
-# This is the core innovation: genuinely different reasoning patterns, not clones.
+# Each spore gets a different model family for reasoning diversity.
 MODEL_ASSIGNMENTS = [
-    "Qwen/Qwen3-235B-A22B",                    # 0: Explorer   -- massive 235B MoE thinking model
-    "meta-llama/Llama-3.3-70B-Instruct",        # 1: Synthesizer -- Meta's strongest instruct model
-    "deepseek-ai/DeepSeek-R1-Distill-Qwen-32B", # 2: Adversarial -- chain-of-thought reasoning
-    "google/gemma-3-27b-it",                     # 3: Validator   -- Google's training + Z.ai brain tier
-    "meta-llama/Llama-4-Scout-17B-16E-Instruct", # 4: Generalist  -- newest MoE architecture
-    "glm-4.7-flash",                            # 5: Brain       -- Z.ai GLM-4.7-Flash (free tier)
-    "deepseek-ai/DeepSeek-R1",                   # 6: Sentinel    -- full 671B MoE reasoning (strongest)
+    "Qwen/Qwen3-235B-A22B",                    # 0: Explorer
+    "meta-llama/Llama-3.3-70B-Instruct",        # 1: Synthesizer
+    "deepseek-ai/DeepSeek-R1-Distill-Qwen-32B", # 2: Adversarial
+    "google/gemma-3-27b-it",                     # 3: Validator
+    "meta-llama/Llama-4-Scout-17B-16E-Instruct", # 4: Generalist
+    "glm-4.7-flash",                            # 5: Brain
+    "deepseek-ai/DeepSeek-R1",                   # 6: Sentinel
 ]
 
-# Spores that get the Z.ai API key for brain-level routing
-ZAI_SPORE_INDICES = {3, 5, 6}  # Validator + Brain + Sentinel (all brain-tier)
+ROLE_NAMES = ["Explorer", "Synthesizer", "Adversarial", "Validator", "Generalist", "Brain", "Sentinel"]
 
 
 def generate_spore_app(
@@ -116,38 +200,32 @@ def generate_spore_app(
     total_spores: int,
     owner: str,
     prefix: str,
-    provider_keys: dict[str, str],
+    cfg: dict,
 ) -> dict[str, str]:
-    """Generate all files for one spore Space.
-
-    Reads the v3 template and substitutes per-spore values.
-    Each spore gets a different primary LLM for model diversity.
-    """
-    # Build peer URLs -- each spore knows about all others
+    """Generate all files for one spore Space."""
+    # Build peer URLs -- every spore knows all others + any external peers
     peers = []
     for i in range(total_spores):
         if i != spore_index:
             peers.append(f"https://{owner}-{prefix}-{i:03d}.hf.space")
 
-    peers_json = json.dumps(peers)
+    # Add external peers from config (for joining existing swarms)
+    extra_peers = cfg.get("peers", [])
+    for p in extra_peers:
+        url = p.strip()
+        if url and not url.startswith("<") and url not in peers:
+            peers.append(url)
 
-    # Assign primary model -- wraps around if more spores than models
+    peers_json = json.dumps(peers)
     primary_model = MODEL_ASSIGNMENTS[spore_index % len(MODEL_ASSIGNMENTS)]
 
-    # Read the v5 template and substitute per-spore values
+    # Read the template
     template_path = Path(__file__).parent / "spore.py"
-    if template_path.exists():
-        app_py = template_path.read_text()
-    else:
-        # Fallback: try alternate names
-        for alt in ["spore_v5.py", "spore_v3.py"]:
-            alt_path = Path(__file__).parent / alt
-            if alt_path.exists():
-                app_py = alt_path.read_text()
-                break
-        else:
-            raise FileNotFoundError("No spore template found")
+    if not template_path.exists():
+        raise FileNotFoundError("spore.py template not found")
+    app_py = template_path.read_text()
 
+    # Substitute all 4 placeholders
     app_py = (
         app_py
         .replace("__SPORE_ID__", spore_id)
@@ -156,29 +234,29 @@ def generate_spore_app(
         .replace("__PRIMARY_MODEL__", primary_model)
     )
 
-    requirements_txt = """crdt-merge>=0.9.5
-httpx>=0.27
-numpy>=1.24
-sentence-transformers>=3.0
-fastapi>=0.115
-uvicorn>=0.30
-"""
+    requirements_txt = (
+        "crdt-merge>=0.9.5\n"
+        "httpx>=0.27\n"
+        "numpy>=1.24\n"
+        "sentence-transformers>=3.0\n"
+        "fastapi>=0.115\n"
+        "uvicorn>=0.30\n"
+    )
 
-    readme_md = f"""---
-title: Synapse Brain Spore
-emoji: "\U0001F9E0"
-colorFrom: purple
-colorTo: blue
-sdk: gradio
-sdk_version: "5.25.2"
-app_file: app.py
-pinned: false
----
-
-Synapse Brain distributed reasoning node.
-Spore ID: `{spore_id}`
-"""
-
+    readme_md = (
+        "---\n"
+        "title: Synapse Brain Spore\n"
+        'emoji: "\U0001F9E0"\n'
+        "colorFrom: purple\n"
+        "colorTo: blue\n"
+        "sdk: gradio\n"
+        'sdk_version: "5.25.2"\n'
+        "app_file: app.py\n"
+        "pinned: false\n"
+        "---\n\n"
+        f"Synapse Brain distributed reasoning node.\n"
+        f"Spore ID: `{spore_id}`\n"
+    )
 
     # Read companion modules
     module_dir = Path(__file__).parent
@@ -187,9 +265,6 @@ Spore ID: `{spore_id}`
         mod_path = module_dir / mod_name
         if mod_path.exists():
             module_files[mod_name] = mod_path.read_text()
-
-    # Sentinel Cortex: llama-cpp-python installed at runtime if available
-    # Package too large for pip install in build step -- Cortex degrades gracefully
 
     result = {
         "app.py": app_py,
@@ -201,20 +276,18 @@ Spore ID: `{spore_id}`
 
 
 def push_space_files(owner: str, name: str, token: str, files: dict[str, str]):
-    """Push files to an HF Space using the huggingface_hub API."""
     from huggingface_hub import CommitOperationAdd
 
     api = get_hf_api(token)
     repo_id = f"{owner}/{name}"
 
-    operations = []
-    for fname, content in files.items():
-        operations.append(
-            CommitOperationAdd(
-                path_in_repo=fname,
-                path_or_fileobj=content.encode("utf-8"),
-            )
+    operations = [
+        CommitOperationAdd(
+            path_in_repo=fname,
+            path_or_fileobj=content.encode("utf-8"),
         )
+        for fname, content in files.items()
+    ]
 
     try:
         api.create_commit(
@@ -223,94 +296,92 @@ def push_space_files(owner: str, name: str, token: str, files: dict[str, str]):
             operations=operations,
             commit_message="deploy spore",
         )
-        print(f"  Pushed {len(files)} files to {repo_id}")
+        print(f"  Pushed {len(files)} files")
     except Exception as e:
-        print(f"  Warning pushing to {repo_id}: {e}")
+        print(f"  Warning: {e}")
 
 
 def main():
     args = parse_args()
+    cfg = merge_config(args)
 
-    private = not args.public
-    token = args.hf_token
+    if not validate_config(cfg):
+        sys.exit(1)
+
+    token = cfg["hf_token"]
+    count = cfg["count"]
+    prefix = cfg["prefix"]
+    private = cfg.get("private", True)
+    api_keys = cfg.get("api_keys", {})
 
     print("Synapse Brain Swarm Launcher")
     print("=" * 40)
 
-    # Get username
-    if args.hf_owner:
-        owner = args.hf_owner
+    # Detect owner
+    owner = cfg.get("hf_owner") or cfg.get("commander") or get_hf_username(token)
+    print(f"Account:  {owner}")
+    print(f"Spores:   {count}")
+    print(f"Private:  {private}")
+
+    keys_active = [k for k, v in api_keys.items() if v]
+    if keys_active:
+        print(f"API keys: {', '.join(keys_active)}")
     else:
-        owner = get_hf_username(token)
-    print(f"HF account: {owner}")
-    print(f"Deploying {args.count} spores ({'private' if private else 'public'})")
-    print(f"Brain tier (GLM-5.1): {'YES' if args.zai_key else 'NO -- using free providers only'}")
+        print("API keys: none (using free-tier providers)")
     print()
 
-    # Collect provider keys for Space secrets
+    # Build secrets -- ALL spores get ALL keys for maximum fallback
     secrets = {"HF_TOKEN": token}
-    if args.zai_key:
-        secrets["ZAI_API_KEY"] = args.zai_key
-    if args.groq_key:
-        secrets["GROQ_API_KEY"] = args.groq_key
-    if args.google_key:
-        secrets["GOOGLE_AI_KEY"] = args.google_key
-    if args.cerebras_key:
-        secrets["CEREBRAS_API_KEY"] = args.cerebras_key
-    if args.mistral_key:
-        secrets["MISTRAL_API_KEY"] = args.mistral_key
+    key_map = {
+        "zai": "ZAI_API_KEY",
+        "groq": "GROQ_API_KEY",
+        "google_ai": "GOOGLE_AI_KEY",
+        "cerebras": "CEREBRAS_API_KEY",
+        "mistral": "MISTRAL_API_KEY",
+    }
+    for cfg_key, env_key in key_map.items():
+        if api_keys.get(cfg_key):
+            secrets[env_key] = api_keys[cfg_key]
 
-    # Also pull from environment if not passed as args
-    for env_key in ["ZAI_API_KEY", "GROQ_API_KEY", "GOOGLE_AI_KEY", "CEREBRAS_API_KEY", "MISTRAL_API_KEY"]:
-        if env_key not in secrets and os.environ.get(env_key):
-            secrets[env_key] = os.environ[env_key]
-
-    # Deploy each spore
+    # Deploy
     space_urls = []
-    for i in range(args.count):
-        name = f"{args.prefix}-{i:03d}"
+    for i in range(count):
+        name = f"{prefix}-{i:03d}"
         spore_id = f"{name}-{hashlib.sha256(f'{owner}{name}'.encode()).hexdigest()[:6]}"
-        print(f"[{i+1}/{args.count}] Deploying {owner}/{name} (spore: {spore_id})")
+        role = ROLE_NAMES[i % len(ROLE_NAMES)]
+        model = MODEL_ASSIGNMENTS[i % len(MODEL_ASSIGNMENTS)].split("/")[-1]
+        print(f"[{i+1}/{count}] {owner}/{name}  ({role} / {model})")
 
-        # Generate files
         files = generate_spore_app(
             spore_id=spore_id,
             spore_index=i,
-            total_spores=args.count,
+            total_spores=count,
             owner=owner,
-            prefix=args.prefix,
-            provider_keys=secrets,
+            prefix=prefix,
+            cfg=cfg,
         )
 
-        if args.dry_run:
+        if cfg.get("dry_run"):
             outdir = Path(f"/tmp/swarm-staging/{name}")
             outdir.mkdir(parents=True, exist_ok=True)
             for fname, content in files.items():
                 (outdir / fname).write_text(content)
-            print(f"  Written to {outdir}")
+            print(f"  Staged at {outdir}")
             space_urls.append(f"https://{owner}-{name}.hf.space")
             continue
 
-        # Create Space
         create_space_repo(owner, name, token, private=private)
         time.sleep(1)
-
-        # Set secrets -- Z.ai key only goes to designated spores
-        spore_secrets = dict(secrets)
-        if i not in ZAI_SPORE_INDICES and "ZAI_API_KEY" in spore_secrets:
-            del spore_secrets["ZAI_API_KEY"]
-        set_space_secrets(owner, name, token, spore_secrets)
+        set_space_secrets(owner, name, token, secrets)
         time.sleep(0.5)
-
-        # Push code
         push_space_files(owner, name, token, files)
-        url = f"https://huggingface.co/spaces/{owner}/{name}"
+
+        url = f"https://{owner}-{name}.hf.space"
         space_urls.append(url)
-        print(f"  Live at {url}")
+        print(f"  Live: {url}")
         print()
 
-        # Small delay between deployments to avoid rate limits
-        if i < args.count - 1:
+        if i < count - 1:
             time.sleep(2)
 
     print()
@@ -320,10 +391,12 @@ def main():
     for url in space_urls:
         print(f"  {url}")
     print()
-    print("Spores will begin reasoning cycles within 60 seconds of startup.")
-    if not args.zai_key:
-        print("Note: No Z.ai key provided. All reasoning uses free-tier providers.")
-        print("Add --zai-key to enable GLM-5.1 as the brain tier.")
+    print("Spores begin reasoning within 60 seconds of startup.")
+    print("Submit a task:  curl -X POST -d '{\"task\": \"your question\"}' <spore-url>/api/task")
+    if not keys_active:
+        print()
+        print("No API keys set. All reasoning uses free-tier providers.")
+        print("Add keys to config.yaml for faster, more reliable responses.")
 
 
 if __name__ == "__main__":
