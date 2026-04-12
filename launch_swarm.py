@@ -179,11 +179,26 @@ Synapse Brain distributed reasoning node.
 Spore ID: `{spore_id}`
 """
 
-    return {
+
+    # Read companion modules
+    module_dir = Path(__file__).parent
+    module_files = {}
+    for mod_name in ["cortex.py", "knowledge_wall.py", "mcp_server.py", "federation.py"]:
+        mod_path = module_dir / mod_name
+        if mod_path.exists():
+            module_files[mod_name] = mod_path.read_text()
+
+    # Sentinel gets Cortex-enabled requirements (llama-cpp-python)
+    if spore_index == total_spores - 1:  # Last spore is always Sentinel
+        requirements_txt += "llama-cpp-python>=0.3.0\n"
+
+    result = {
         "app.py": app_py,
         "requirements.txt": requirements_txt,
         "README.md": readme_md,
     }
+    result.update(module_files)
+    return result
 
 
 def push_space_files(owner: str, name: str, token: str, files: dict[str, str]):

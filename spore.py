@@ -37,6 +37,33 @@ from crdt_merge.clocks import VectorClock
 from crdt_merge.merkle import MerkleTree
 
 # ---------------------------------------------------------------------------
+# Cortex, Knowledge Wall, MCP, Federation -- graceful fallback if unavailable
+# ---------------------------------------------------------------------------
+try:
+    from cortex import Cortex
+    CORTEX_AVAILABLE = True
+except ImportError:
+    CORTEX_AVAILABLE = False
+
+try:
+    from knowledge_wall import KnowledgeWall, DualMemory
+    WALL_AVAILABLE = True
+except ImportError:
+    WALL_AVAILABLE = False
+
+try:
+    from mcp_server import SynapseMCPServer, mount_mcp_routes
+    MCP_AVAILABLE = True
+except ImportError:
+    MCP_AVAILABLE = False
+
+try:
+    from federation import SwarmDNA, FederationRegistry, mount_federation_routes
+    FEDERATION_AVAILABLE = True
+except ImportError:
+    FEDERATION_AVAILABLE = False
+
+# ---------------------------------------------------------------------------
 # Configuration (substituted per spore by launcher)
 # ---------------------------------------------------------------------------
 SPORE_ID = os.environ.get("SYNAPSE_SPORE_ID", "__SPORE_ID__")
@@ -802,6 +829,51 @@ learner = TemporalLearner(memory)
 convergence = SemanticConvergence()
 HF_AUTH = {"Authorization": f"Bearer {HF_TOKEN}"}
 
+# ---------------------------------------------------------------------------
+# Knowledge Wall + Dual Memory (BastionWall privacy boundary)
+# ---------------------------------------------------------------------------
+if WALL_AVAILABLE:
+    _wall_secret = hashlib.sha256(f"{SPORE_ID}:{HF_TOKEN}".encode()).digest()
+    knowledge_wall = KnowledgeWall(SPORE_ID, _wall_secret)
+    dual_memory = DualMemory(memory, knowledge_wall)
+    log.info("Knowledge Wall active -- private/collective memory separation enabled")
+else:
+    knowledge_wall = None
+    dual_memory = None
+    log.info("Knowledge Wall unavailable -- running with single memory layer")
+
+# ---------------------------------------------------------------------------
+# Federation Registry
+# ---------------------------------------------------------------------------
+if FEDERATION_AVAILABLE:
+    swarm_dna = SwarmDNA()
+    federation = FederationRegistry(SPORE_ID, swarm_dna)
+    log.info("Federation protocol active -- DNA hash: %s", swarm_dna.dna_hash)
+else:
+    federation = None
+    swarm_dna = None
+
+# ---------------------------------------------------------------------------
+# MCP Server
+# ---------------------------------------------------------------------------
+if MCP_AVAILABLE:
+    mcp = SynapseMCPServer(SPORE_ID, MY_ROLE, PRIMARY_MODEL)
+    log.info("MCP server initialized -- tools will bind after FastAPI creation")
+else:
+    mcp = None
+
+# ---------------------------------------------------------------------------
+# Cortex (local micro-LLM) -- Sentinel only
+# ---------------------------------------------------------------------------
+if CORTEX_AVAILABLE and MY_ROLE == "sentinel":
+    cortex = Cortex(enabled=True)
+    log.info("Cortex initializing -- Qwen3-4B loading in background")
+elif CORTEX_AVAILABLE:
+    cortex = Cortex(enabled=False)  # placeholder, not loaded
+    log.info("Cortex available but not active (role: %s)", MY_ROLE)
+else:
+    cortex = None
+
 # Store initial self-knowledge in memory
 memory.remember(
     f"I am spore {SPORE_ID}, role: {MY_ROLE}, model: {PRIMARY_MODEL}. "
@@ -1089,6 +1161,11 @@ async def gossip_push():
 
     mem_sync = memory.sync_payload()
 
+    # Build collective knowledge payload if wall is active
+    collective_payload = {}
+    if dual_memory:
+        collective_payload = dual_memory.collective_payload()
+
     payload = {
         "from": SPORE_ID,
         "role": MY_ROLE,
@@ -1098,6 +1175,7 @@ async def gossip_push():
         "peer_list": list(spore_state.peers_seen),
         "memory": mem_sync,
         "trust": trust.to_dict(),
+        "collective": collective_payload,
     }
 
     async with httpx.AsyncClient(timeout=12.0, headers=HF_AUTH) as client:
@@ -1164,6 +1242,20 @@ def process_gossip_response(data):
     if trust_data:
         trust.merge_incoming(trust_data)
 
+    # Merge collective knowledge (from Knowledge Wall)
+    collective_data = data.get("collective")
+    if collective_data and dual_memory:
+        new_collective = dual_memory.merge_collective(collective_data)
+        if new_collective > 0:
+            log.info("Merged %d new collective insights from %s", new_collective, peer_id)
+
+    # Federation: register node if this is a federation gossip
+    if data.get("federation") and federation:
+        from_id = data.get("from", "")
+        if from_id:
+            federation.register(from_id, "", data.get("role", "contributor"))
+            federation.record_contribution(from_id)
+
 
 def handle_gossip_request(data):
     """Handle incoming gossip and return our state for bidirectional exchange."""
@@ -1182,7 +1274,7 @@ def handle_gossip_request(data):
             "final_answer": task.final_answer,
         }
 
-    return {
+    response = {
         "status": "ok",
         "spore": SPORE_ID,
         "role": MY_ROLE,
@@ -1194,6 +1286,9 @@ def handle_gossip_request(data):
         "memory": memory.sync_payload(),
         "trust": trust.to_dict(),
     }
+    if dual_memory:
+        response["collective"] = dual_memory.collective_payload()
+    return response
 
 
 # ---------------------------------------------------------------------------
@@ -1282,6 +1377,106 @@ if MY_ROLE == "sentinel":
             self.rollback_store = {}  # space_id -> original content for rollback
 
     _sentinel = SentinelState()
+
+    # Register Cortex tools for sentinel (if Cortex is available)
+    if CORTEX_AVAILABLE and cortex and cortex.enabled:
+        def _cortex_tool_analyze_telemetry(telemetry_json: str = "") -> dict:
+            """Analyze swarm telemetry for anomalies and trends."""
+            try:
+                data = json.loads(telemetry_json) if telemetry_json else {}
+                peers = data.get("peers", {})
+                issues = []
+                for pid, info in peers.items():
+                    cycles = info.get("cycles", 0)
+                    if cycles == 0:
+                        issues.append(f"{pid}: zero cycles (stalled or offline)")
+                    deltas = info.get("deltas_produced", 0) + info.get("deltas_received", 0)
+                    if deltas == 0:
+                        issues.append(f"{pid}: zero deltas (gossip failure)")
+                return {
+                    "peer_count": len(peers),
+                    "issues": issues,
+                    "healthy": len(peers) - len(issues),
+                    "anomaly_detected": len(issues) > 0,
+                }
+            except Exception as e:
+                return {"error": str(e)}
+
+        def _cortex_tool_review_patch(old_text: str = "", new_text: str = "") -> dict:
+            """Review a code patch for safety and correctness."""
+            dangerous = ["os.system(", "subprocess.", "eval(", "exec(",
+                         "__import__(", "shutil.rmtree", "os.remove("]
+            found = [d for d in dangerous if d in new_text and d not in old_text]
+            size_change = len(new_text) - len(old_text)
+            return {
+                "dangerous_patterns": found,
+                "safe": len(found) == 0,
+                "size_delta": size_change,
+                "adds_lines": new_text.count("\n") - old_text.count("\n"),
+            }
+
+        def _cortex_tool_query_memories(query: str = "", top_k: int = 5) -> dict:
+            """Search CRDT memory for relevant context."""
+            results = memory.recall(query, top_k)
+            return {
+                "results": [{
+                    "content": r.get("content", "")[:500],
+                    "similarity": r.get("similarity", 0),
+                    "spore": r.get("spore", ""),
+                } for r in results],
+                "total_memories": memory.size,
+            }
+
+        def _cortex_tool_check_health(peer_data: str = "") -> dict:
+            """Evaluate peer health data for anomalies."""
+            try:
+                peers = json.loads(peer_data) if peer_data else {}
+                stalled = [p for p, d in peers.items() if d.get("cycles", 0) == 0]
+                low_trust = [p for p, d in peers.items()
+                             if isinstance(d.get("trust"), dict)
+                             and d["trust"].get("overall", 1.0) < 0.3]
+                return {
+                    "total": len(peers),
+                    "stalled": stalled,
+                    "low_trust": low_trust,
+                    "healthy_ratio": (len(peers) - len(stalled)) / max(1, len(peers)),
+                }
+            except Exception as e:
+                return {"error": str(e)}
+
+        cortex.register_tool(
+            "analyze_telemetry",
+            "Analyze swarm telemetry JSON for anomalies, stalled peers, and trends",
+            {"type": "object", "properties": {
+                "telemetry_json": {"type": "string", "description": "JSON telemetry snapshot"}
+            }},
+            _cortex_tool_analyze_telemetry,
+        )
+        cortex.register_tool(
+            "review_patch",
+            "Review a code patch (old_text -> new_text) for safety issues",
+            {"type": "object", "properties": {
+                "old_text": {"type": "string"}, "new_text": {"type": "string"}
+            }},
+            _cortex_tool_review_patch,
+        )
+        cortex.register_tool(
+            "query_memories",
+            "Search CRDT memory for context relevant to a query",
+            {"type": "object", "properties": {
+                "query": {"type": "string"}, "top_k": {"type": "integer", "default": 5}
+            }},
+            _cortex_tool_query_memories,
+        )
+        cortex.register_tool(
+            "check_health",
+            "Evaluate peer health data for anomalies and issues",
+            {"type": "object", "properties": {
+                "peer_data": {"type": "string", "description": "JSON peer health data"}
+            }},
+            _cortex_tool_check_health,
+        )
+        log.info("Cortex: %d sentinel tools registered", len(cortex.tools.names()))
 
     async def sentinel_collect_telemetry():
         """Collect health + task state from all peers. Returns telemetry snapshot."""
@@ -2001,6 +2196,32 @@ Respond ONLY with this JSON (no other text):
 
                     if can_analyze and can_deploy and has_data:
                         _sentinel.last_analysis = now
+
+                        # System 1 pre-filter: Cortex does quick telemetry triage
+                        cortex_triage = None
+                        if cortex and cortex.is_ready():
+                            triage_prompt = (
+                                f"Analyze this swarm telemetry snapshot. "
+                                f"Report: any stalled peers, gossip failures, "
+                                f"memory growth anomalies, or trust degradation. "
+                                f"If everything is healthy and stable, say STABLE.\n\n"
+                                f"Telemetry: {json.dumps(telemetry, default=str)[:3000]}"
+                            )
+                            cortex_result = cortex.agent_loop(triage_prompt)
+                            if cortex_result and not cortex_result.get("escalate"):
+                                cortex_triage = cortex_result.get("result", "")
+                                if cortex_triage and "STABLE" in cortex_triage.upper():
+                                    log.info("Sentinel: Cortex triage = STABLE -- skipping full analysis")
+                                    memory.remember(
+                                        f"Cortex triage: swarm stable, no analysis needed",
+                                        metadata={"type": "cortex_triage", "result": "stable"},
+                                    )
+                                    await asyncio.sleep(120)
+                                    continue
+                                log.info("Sentinel: Cortex found issues -- escalating to System 2")
+                            else:
+                                log.info("Sentinel: Cortex escalated -- using System 2 directly")
+
                         log.info("Sentinel: running Five-Phase analysis on %d snapshots...",
                                  len(_sentinel.telemetry))
 
@@ -2086,6 +2307,23 @@ from fastapi import FastAPI
 from fastapi.responses import JSONResponse
 
 api = FastAPI()
+
+# Mount MCP server routes
+if MCP_AVAILABLE and mcp:
+    mcp.bind(
+        memory=memory,
+        dual_memory=dual_memory,
+        trust_store=trust,
+        spore_state=spore_state,
+        cortex=cortex if MY_ROLE == "sentinel" else None,
+    )
+    mount_mcp_routes(api, mcp)
+    log.info("MCP server mounted at /mcp with %d tools", len(mcp.tools))
+
+# Mount Federation routes
+if FEDERATION_AVAILABLE and federation:
+    mount_federation_routes(api, federation)
+    log.info("Federation protocol mounted at /federation/*")
 
 
 @api.post("/api/gossip")
@@ -2276,8 +2514,55 @@ async def api_sentinel_deployments():
     })
 
 
+# ---------------------------------------------------------------------------
+# New API endpoints: Cortex, Knowledge Wall, Federation status
+# ---------------------------------------------------------------------------
+@api.get("/api/cortex")
+async def api_cortex_status():
+    if cortex:
+        return JSONResponse(cortex.stats())
+    return JSONResponse({"enabled": False, "role": MY_ROLE})
+
+
+@api.get("/api/wall")
+async def api_wall_status():
+    if knowledge_wall:
+        return JSONResponse({
+            "wall": knowledge_wall.stats(),
+            "collective_size": dual_memory.collective_size if dual_memory else 0,
+            "recent_audit": knowledge_wall.recent_audit(10),
+        })
+    return JSONResponse({"enabled": False})
+
+
+@api.get("/api/federation/status")
+async def api_federation_status():
+    if federation:
+        return JSONResponse(federation.stats())
+    return JSONResponse({"enabled": False})
+
+
 # Mount Gradio UI onto FastAPI -- both served on same port
 app = gr.mount_gradio_app(api, demo, path="/")
+
+# Wrap memory.remember through Knowledge Wall when available
+if dual_memory:
+    _original_remember = memory.remember
+    def _walled_remember(content, metadata=None):
+        key = _original_remember(content, metadata)
+        # Attempt distillation to collective (wall decides what crosses)
+        raw_entry = {"content": content, "metadata": metadata or {}}
+        distilled = knowledge_wall.distill(raw_entry)
+        if distilled:
+            import hashlib as _hlib
+            ckey = _hlib.sha256(
+                f"collective:{distilled['content']}:{distilled['provenance']}".encode()
+            ).hexdigest()[:16]
+            dual_memory._collective_keys.add(ckey)
+            dual_memory._collective_records[ckey] = distilled
+        return key
+    memory.remember = _walled_remember
+    log.info("Memory.remember wrapped through Knowledge Wall")
 
 # Start heartbeat in background thread
 threading.Thread(target=start_heartbeat, daemon=True).start()
@@ -2286,6 +2571,8 @@ threading.Thread(target=start_heartbeat, daemon=True).start()
 if MY_ROLE == "sentinel":
     threading.Thread(target=start_sentinel_loop, daemon=True, name="sentinel").start()
     log.info("Sentinel monitoring loop started")
+    if cortex and cortex.enabled:
+        log.info("Cortex loading in background -- Sentinel will use System 1 when ready")
 
 if __name__ == "__main__":
     import uvicorn
