@@ -1,53 +1,35 @@
-# Synapse Brain -- Configuration
-#
-# Copy to config.yaml and fill in your HuggingFace token.
-# Everything else is optional.
-#
-#   cp config.template.yaml config.yaml
-#   python launch_swarm.py --config config.yaml
+# Synapse Brain Swarm Configuration
+# Copy this file to config.yaml and fill in your values.
+# At minimum you need: hf_token + at least one LLM provider key.
 
-# --- REQUIRED ---
+# HuggingFace token (required for deployment and model access)
+hf_token: "<your-hf-token>"
 
-# HuggingFace token (free account works, read+write access)
-# Get one at: https://huggingface.co/settings/tokens
-hf_token: ""
+# Deployment target (your HF org or username)
+hf_org: "<your-hf-org>"
 
-# --- OPTIONAL ---
+# LLM Provider API Keys (at least one required)
+# The swarm tries providers in order and falls back automatically.
+# Get free keys:
+#   Z.ai:        https://open.bigmodel.cn/ (GLM-4 models, generous free tier)
+#   Groq:        https://console.groq.com/ (Llama 3.3 70B, 30 req/min free)
+#   Cerebras:    https://cloud.cerebras.ai/ (Llama 3.3 70B, 30 req/min free)
+#   Google AI:   https://aistudio.google.com/ (Gemini Flash, 15 req/min free)
+#   OpenRouter:  https://openrouter.ai/ (various free models)
 
-# Number of spores (default: 3)
-# 3 = good starting point, 7 = full model diversity
-count: 3
+providers:
+  zai_api_key: ""        # Recommended: fast, generous limits
+  groq_api_key: ""       # Recommended: very fast inference
+  cerebras_api_key: ""   # Fast inference
+  google_ai_key: ""      # Gemini Flash free tier
+  openrouter_api_key: "" # Various free models
 
-# API keys for LLM providers (all optional, all have free tiers)
-# Each key adds model diversity. No keys = free-tier only.
-api_keys:
-  zai: ""          # Z.ai -- GLM-4.7-Flash (free, recommended)
-  groq: ""         # Groq -- Llama, Mixtral (free tier)
-  google_ai: ""    # Google AI Studio -- Gemini (free tier)
-  cerebras: ""     # Cerebras -- fast inference (free tier)
+# Spore count (default: 3 for personal use, 7 for full swarm)
+spore_count: 3
 
-# Your HF username or org (auto-detected from token if blank)
-hf_owner: ""
-
-# Space name prefix (default: synapse-spore)
-prefix: "synapse-spore"
-
-# --- JOINING AN EXISTING SWARM ---
-
-# To connect your spores to an existing swarm, add peer URLs.
-# Your nodes will discover the rest of the network via gossip.
-# Leave empty to run a standalone swarm.
-peers: []
-#  - "https://some-swarm-synapse-spore-000.hf.space"
-#  - "https://some-swarm-synapse-spore-001.hf.space"
-
-# --- ADVANCED ---
-
-# Create Spaces as private (default: true)
-private: true
-
-# Enable Sentinel on last spore (autonomous code deployment)
-sentinel: false
-
-# Enable local Cortex micro-LLM on Sentinel
-cortex: false
+# Model assignments (optional - defaults to diverse mix)
+# Each spore gets a primary model. Leave empty for auto-assignment.
+# models:
+#   - "Qwen/Qwen3-235B-A22B"
+#   - "meta-llama/Llama-3.3-70B-Instruct"
+#   - "deepseek-ai/DeepSeek-R1-Distill-Qwen-32B"
