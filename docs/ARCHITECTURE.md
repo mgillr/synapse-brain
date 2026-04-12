@@ -2,254 +2,159 @@
 
 ## Overview
 
-Synapse Brain is a distributed reasoning system where autonomous agents (spores) form
-a gossip mesh, reason independently using different LLM families, and converge on
-synthesized answers through CRDT-backed persistent memory and trust-weighted integration.
+Synapse Brain is a distributed reasoning system built on three layers:
 
-The system is designed around three invariants:
+1. **Spore Layer** -- autonomous LLM agents that reason independently
+2. **Memory Layer** -- CRDT-backed persistent storage with semantic indexing
+3. **Trust Layer** -- E4 recursive trust lattice for peer quality scoring
 
-1. **Nothing is ever forgotten** -- CRDT OR-Set with add-wins semantics
-2. **Every perspective is genuinely independent** -- different model families per spore
-3. **Trust is earned, not assigned** -- E4 DeltaTrustLattice tracks interaction quality
+## Memory Model
 
-## System Layers
+### Never-Forgetting Property
 
-### Layer 1: Gossip Mesh
+Every spore maintains an OR-Set (from crdt-merge) with add-wins semantics.
+When a spore produces a reasoning artifact, it is added to the local OR-Set
+and propagated to all peers via gossip.
 
-Spores communicate through HTTP gossip over a fully connected mesh. Every spore
-knows every other spore's URL and authenticates with HF_TOKEN (for private Spaces).
+OR-Set add-wins means: if one spore adds a memory and another concurrently
+does anything else, the add wins. Memories only accumulate. The total
+memory count across the swarm grows monotonically.
 
-Gossip cycle (every 20 seconds):
-1. Select a random peer
-2. Exchange health + clock + delta count
-3. Sync memory state (new deltas since last sync)
-4. Update trust scores based on peer interaction
-5. Propagate any active tasks and their reasoning state
+### Semantic Sliding Window
 
-The mesh is eventually consistent. A delta produced by any spore reaches all other
-spores within 2-3 gossip cycles (40-60 seconds).
+A background sidecar continuously indexes all memories using
+sentence-transformers. When a spore needs context for a new reasoning
+task, it retrieves the top-K most semantically relevant memories.
 
-### Layer 2: CRDT Memory
+This is the key to scaling: the context window size is fixed regardless
+of total memory count. A spore with 100 memories and a spore with
+1,000,000 memories both use the same context window. Retrieval time
+is O(log N) with HNSW indexing.
 
-All persistent state is stored in `crdt-merge` data structures:
-
-| Structure | Purpose | Semantics |
-|-----------|---------|-----------|
-| `ORSet` | Reasoning deltas, claims, memories | Add-wins, merge-idempotent |
-| `MerkleTree` | Memory integrity verification | Hash-chain provenance |
-| `VectorClock` | Causal ordering of events | Lamport timestamps per spore |
-| `DeltaTrustLattice` | Inter-spore trust scores | Monotonic trust deltas |
-
-Memory is organized into four stores:
-- **reasoning**: Task-specific reasoning deltas with claims, confidence, phase
-- **knowledge**: Persistent facts extracted from converged syntheses
-- **trust_events**: Record of every trust-affecting interaction
-- **temporal**: Self-observation data (cycle times, error rates, quality scores)
-
-The sidecar indexer runs as a background thread, continuously building embedding
-indices over the reasoning and knowledge stores. When a spore needs context for a
-new reasoning cycle, it retrieves by semantic similarity -- not by recency or
-position in a context window.
-
-### Layer 3: Cognitive Protocol
-
-Every spore receives the complete Master Cognitive Protocol (913 lines, 18 parts).
-This includes:
-
-- **Five-Phase Discipline**: Orient, Analyze, Design, Execute, Validate
-- **11 Operational Mandates**: Including "never guess", "prove before building",
-  "understand why before fixing"
-- **Three-Tier Synapse**: Reactive (fast response), Analytical (deep reasoning),
-  Strategic (long-term planning)
-
-The cognitive role (Explorer, Synthesizer, Adversarial, Validator, Generalist, Brain)
-determines which aspects of the protocol are emphasized in the system prompt, but
-every spore has access to the full protocol.
-
-### Layer 4: Trust and Quality
-
-The E4 DeltaTrustLattice manages trust between spores:
+### Memory Lifecycle
 
 ```
-Trust Score = f(interaction_history, contribution_quality, convergence_alignment)
+New reasoning artifact
+    |
+    v
+Add to local OR-Set (instant, local)
+    |
+    v
+Gossip to peers (async, background)
+    |
+    v
+Peers add to their OR-Sets (add-wins merge)
+    |
+    v
+Sidecar indexes new memory (background)
+    |
+    v
+Available for semantic retrieval (all spores)
 ```
 
-Trust affects:
-- **Gossip priority**: High-trust peers are synced first
-- **Synthesis weighting**: High-trust contributions carry more weight
-- **Anomaly detection**: Sudden trust drops trigger investigation
+## Trust Model
 
-The Validator spore (003) has brain-tier access via Z.ai GLM-4.7-Flash for deep
-quality assessment. When convergence is reached, the Validator can escalate to the
-brain tier to verify the synthesis before it becomes part of persistent knowledge.
+### E4 Recursive Trust Lattice
 
-### Layer 5: Temporal Self-Learning
+Each spore maintains a DeltaTrustLattice (from crdt-merge) that tracks
+peer trust scores. Trust is earned through consistent, high-quality
+contributions over time.
 
-Each spore maintains a temporal baseline of its own operational metrics:
+Trust flows into synthesis: when multiple spores contribute to a
+converged answer, higher-trust contributions carry more weight.
 
-- Average cycle time and standard deviation
-- Error rate distribution
-- Reasoning quality scores (assessed by peer feedback)
-- Convergence contribution rate
+### Trust Update
 
-The TAI (Temporal Accumulating Intelligence) pattern detects drift: if a spore's
-recent performance deviates significantly from its established baseline, it flags
-an anomaly. This is not rule-based -- the system learns what "normal" looks like
-from its own history.
+After each reasoning cycle:
+1. All spores that participated get a trust delta
+2. The delta magnitude depends on how useful their contribution was
+3. Trust propagates through the lattice via gossip
+4. Over time, consistently good spores accumulate high trust
 
-## Reasoning Flow
+### Symbiotic Lattice Trust (SLT)
 
-### Task Submission
+SLT is a detection-and-exclusion mechanism, not classical BFT. It does
+not tolerate Byzantine faults -- it detects them through trust score
+divergence and excludes the faulty peer from synthesis weighting.
 
-1. Client POSTs task to any spore's `/api/task` endpoint
-2. Receiving spore generates a task ID, stores task in memory
-3. Gossip carries the task to all spores within 1-2 cycles
-4. Each spore begins independent reasoning
+A peer whose trust drops below the lattice minimum is effectively
+excluded from influencing converged answers while still being able
+to participate and rebuild trust.
 
-### Progressive Phases
+## Privacy Model
 
-| Phase | Cycles | Behavior |
-|-------|--------|----------|
-| DIVERGE | 0-4 | Maximum exploration, broad hypothesis generation |
-| DEEPEN | 5-9 | Evidence gathering, claim refinement, challenge |
-| CONVERGE | 10+ | Agreement-seeking, synthesis, trust-weighted merge |
+### Knowledge Wall
 
-Phase transitions are per-task and tracked individually.
+The Knowledge Wall separates each spore's memory into two domains:
 
-### Reasoning Cycle
+- **Private memory** -- raw input from the commander, local reasoning
+  artifacts. Never leaves the spore. Never enters gossip.
+- **Collective memory** -- distilled insights extracted from private
+  reasoning. HMAC-bound provenance. This is what gets gossiped.
 
-Each cycle per task:
-1. **Context retrieval**: Semantic search over memory for relevant prior reasoning
-2. **Peer input**: Incorporate recent deltas from other spores (trust-weighted)
-3. **LLM reasoning**: Generate structured response with claims + confidence
-4. **Claim extraction**: Parse claims from LLM output
-5. **Delta creation**: Package as CRDT delta with metadata
-6. **Memory storage**: Add to OR-Set, update Merkle tree
-7. **Convergence check**: Compute semantic similarity across all spore claims
+The distillation process is one-way: raw data produces distilled
+insights, but the insights cannot be reversed to recover the raw data.
+Even if a peer is fully compromised, it only has access to distilled
+collective memories -- the raw input from other commanders does not
+exist on any other spore.
 
-### Convergence Detection
+## Communication Model
 
-Convergence is measured by semantic similarity between extracted claims across spores:
+### Gossip Mesh
 
-1. Embed all current claims using sentence-transformers
-2. Compute pairwise cosine similarity
-3. Calculate agreement score (fraction of pairs above threshold)
-4. Track agreement over 3 consecutive cycles
-5. If stable above 0.70 for 3 cycles, trigger forced synthesis
+Spores communicate via HTTP gossip. Each spore knows a set of peers
+and periodically shares:
 
-The synthesizer spore (001) produces the final synthesis, weighted by trust scores.
-The validator spore (003) reviews and approves or rejects.
+- New memories (OR-Set deltas)
+- Trust updates (DeltaTrustLattice deltas)
+- Health status
+- Task state
 
-### Forced Synthesis
+Gossip is eventually consistent -- all spores converge to the same
+state given sufficient time and connectivity.
 
-When convergence is detected:
-1. Synthesizer collects all claims from all spores with trust weights
-2. Generates a unified synthesis incorporating the strongest contributions
-3. Validator reviews using brain-tier reasoning (GLM-4.7-Flash if available)
-4. If approved, synthesis is promoted to knowledge store
-5. All spores receive the converged result via gossip
+### Federation
 
-## Spore Configuration
+New nodes join the swarm by:
+1. Installing crdt-merge >= 0.9.5
+2. Connecting to any existing peer
+3. Passing Swarm DNA integrity verification
+4. Beginning gossip exchange
 
-Each spore is configured through environment variables:
+Swarm DNA is a hash of the federation protocol. Modified nodes fail
+verification and cannot join.
 
-| Variable | Purpose |
-|----------|---------|
-| `SYNAPSE_SPORE_ID` | Unique identifier |
-| `SYNAPSE_SPORE_INDEX` | Numeric index (determines role) |
-| `SYNAPSE_PEERS` | JSON array of peer URLs |
-| `SYNAPSE_PRIMARY_MODEL` | HF model ID for primary reasoning |
-| `HF_TOKEN` | HuggingFace API token |
-| `ZAI_API_KEY` | Z.ai API key (spores 003, 005 only) |
+## Spore Roles
 
-## LLM Provider Chain
+Each spore has a cognitive role that influences its reasoning approach:
 
-Each spore has a primary model and a fallback chain:
+| Role | Behavior |
+|---|---|
+| Explorer | Divergent thinking, generates novel hypotheses |
+| Synthesizer | Convergent thinking, combines and refines |
+| Adversarial | Challenges claims, finds weaknesses |
+| Validator | Verifies consistency, checks evidence |
+| Generalist | Balanced approach, fills gaps |
+| Brain | Deep reasoning, complex analysis |
+| Sentinel | Autonomous code deployment, system maintenance |
 
-1. **Primary**: Assigned per-spore model via HF Inference API or Z.ai
-2. **Fallback 1**: HF Router (alternative model from same family)
-3. **Fallback 2**: Any available free-tier provider
-4. **Brain tier**: GLM-4.7-Flash via Z.ai (spores 003, 005 only)
+Roles are not rigid partitions -- every spore has the full Master
+reasoning protocol. The role is a lens that influences which aspects
+of the protocol are emphasized.
 
-The brain tier is used for:
-- Deep validation of convergence quality (Validator)
-- Architectural oversight and meta-reasoning (Brain)
-- Synthesis review before knowledge promotion
+## Scaling Properties
 
-## Data Flow Diagram
+### Known (tested)
 
-```
-Task submitted
-     |
-     v
-[Spore receives] --gossip--> [All spores receive]
-     |                              |
-     v                              v
-[DIVERGE phase]              [DIVERGE phase]
-     |                              |
-     v                              v
-[Claims extracted]           [Claims extracted]
-     |                              |
-     v                              v
-[Stored in OR-Set]           [Stored in OR-Set]
-     |                              |
-     +---------- gossip sync -------+
-     |                              |
-     v                              v
-[DEEPEN phase]               [DEEPEN phase]
-(incorporates peer claims)   (incorporates peer claims)
-     |                              |
-     v                              v
-[Refined claims]             [Refined claims]
-     |                              |
-     +---------- gossip sync -------+
-     |
-     v
-[Convergence detected]
-     |
-     v
-[Synthesizer produces unified answer]
-     |
-     v
-[Validator reviews (brain tier if available)]
-     |
-     v
-[Promoted to knowledge store]
-     |
-     v
-[Available for all future reasoning]
-```
+- 7 spores: stable convergence, 53+ tasks, 45,000+ aggregate memories
+- Memory retrieval: no degradation up to ~7K per spore
+- Trust: stabilizes in 0.40-0.70 range within ~20 tasks
+- Gossip: converges within 3-5 cycles at 7 nodes
 
-## Scaling
+### Unknown (needs testing)
 
-The architecture scales horizontally:
-- Add more spores by increasing `--count` in the launcher
-- Each spore is stateless on disk (all state is in CRDT memory)
-- Gossip mesh self-organizes as new peers join
-- Trust is established organically through interaction
-
-Practical limits:
-- Gossip overhead grows O(n) per cycle (each spore syncs with one random peer)
-- Full mesh convergence time: O(n log n) gossip cycles
-- Memory sync payload grows with delta count (paginated at 100 deltas per sync)
-- Free-tier LLM rate limits constrain per-spore reasoning throughput
-
-## File Structure
-
-```
-synapse-brain/
-  spore.py              -- Canonical spore (deployed to each HF Space)
-  launch_swarm.py       -- Swarm deployment script
-  requirements.txt      -- Spore pip dependencies
-  command-center/
-    app.py              -- Monitoring dashboard (deployed as HF Space)
-    requirements.txt
-  docs/
-    ARCHITECTURE.md     -- This document
-    BRAIN-PROTOCOL.md   -- Full cognitive protocol specification
-    SELF-EVOLUTION.md   -- Self-improvement and temporal learning
-    CONVERGENCE.md      -- Convergence detection and synthesis
-  synapse_brain/        -- Python package (local CLI, future)
-  tests/
-    test_spore.py       -- Unit and integration tests
-```
+- Memory degradation curve at 100K+ per spore
+- Convergence quality at 20+ spores
+- Gossip convergence time at 100+ nodes
+- Trust dynamics with adversarial peers at scale
+- Cross-commander federation behavior

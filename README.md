@@ -1,245 +1,194 @@
 # Synapse Brain
 
-Distributed reasoning swarm where multiple LLM agents converge on solutions through
-CRDT-backed persistent memory, gossip-mesh communication, and trust-weighted synthesis.
+Experimental distributed reasoning swarm where autonomous LLM agents converge on
+solutions through never-forgetting CRDT memory, gossip-mesh communication, and
+trust-weighted synthesis.
 
-```python
-# Deploy a 6-spore swarm with one command
-python launch_swarm.py --count 6 --hf-token $HF_TOKEN --zai-key $ZAI_KEY
+**The foundation is built. We want to see how far it scales.**
+
+```
+git clone https://github.com/mgillr/synapse-brain.git
+cd synapse-brain
+cp config.template.yaml config.yaml   # edit with your API keys (or leave blank for free-tier)
+python launch_swarm.py --config config.yaml
 ```
 
-Six spores, six different LLM families, one converging intelligence that never forgets.
+Three commands. Your swarm is live.
 
-## What It Does
+## What This Is
 
-Synapse Brain decomposes reasoning tasks across a mesh of autonomous agents (spores),
-each running a different large language model. Spores reason independently, share
-discoveries via gossip protocol, build trust organically through interaction quality,
-and converge on synthesized answers that no single model could produce alone.
+An experimental implementation of swarm intelligence with a core property:
+**the swarm never forgets.** Every piece of reasoning every agent produces is
+persisted in a CRDT-backed memory store using add-wins semantics. Nothing is
+ever deleted. A spore that has been running for months remembers everything
+from its first cycle.
 
-Every piece of reasoning is persisted in a CRDT-backed memory store. Nothing is ever
-deleted. The system indexes continuously through a sidecar process so retrieval is
-instant without context window pressure. A spore that has been running for six months
-remembers everything from day one.
+The intelligent sliding window surfaces only the most relevant context per
+query through continuous semantic indexing -- the context window stays fixed
+regardless of total memory size.
+
+We want to find the limits. How large can a swarm grow before memory becomes
+a bottleneck? How many concurrent agents can share context effectively? What
+happens to convergence quality at 100 nodes? 1,000? 10,000?
 
 ## Architecture
 
 ```
-                    Command Center (monitoring)
-                           |
-        +--------+---------+---------+---------+--------+
-        |        |         |         |         |        |
-    Spore-0  Spore-1   Spore-2  Spore-3   Spore-4  Spore-5
-    Explorer Synth.    Advers.  Validator  General. Brain
-    Qwen3    Llama3.3  DeepSeek Gemma3     Llama4   GLM-4.7
-    235B     70B       R1 32B   27B+Z.ai   Scout    Flash
-        |        |         |         |         |        |
-        +--------+---------+---------+---------+--------+
-                    Gossip Mesh (HTTP + HF_TOKEN)
-                           |
-                    CRDT Memory Layer
-                    (crdt-merge 0.9.5)
-                    OR-Set + MerkleDAG
-                    + E4 Trust Lattice
+             Command Center (monitoring + analytics)
+                        |
+     +--------+---------+---------+---------+--------+---------+
+     |        |         |         |         |        |         |
+ Spore-0  Spore-1   Spore-2  Spore-3   Spore-4  Spore-5  Spore-6
+ Explorer Synth.    Advers.  Validator  General. Brain    Sentinel
+     |        |         |         |         |        |         |
+     +--------+---------+---------+---------+--------+---------+
+                     Gossip Mesh (HTTP + auth)
+                            |
+                     CRDT Memory Layer
+                     (crdt-merge >= 0.9.5)
+                     OR-Set + MerkleDAG
+                     + E4 Trust Lattice
 ```
 
-### Swarm Topology
+Each spore runs a different LLM family. They reason independently, share
+discoveries via gossip, build trust organically through interaction quality,
+and converge on synthesized answers that no single model produces alone.
 
-| Spore | Cognitive Role | Primary Model | Family | Special |
-|-------|---------------|---------------|--------|---------|
-| 000 | Explorer | Qwen3 235B MoE | Qwen (Alibaba) | Thinking model, chain-of-thought |
-| 001 | Synthesizer | Llama 3.3 70B | Meta | Best instruct model |
-| 002 | Adversarial | DeepSeek R1 Distill 32B | DeepSeek | Explicit reasoning tokens |
-| 003 | Validator | Gemma 3 27B + GLM-4.7 brain | Google + Z.ai | Dual-tier quality gate |
-| 004 | Generalist | Llama 4 Scout 17B MoE | Meta Llama 4 | Newest MoE architecture |
-| 005 | Brain | GLM-4.7-Flash | ZhipuAI | Free tier, architectural oversight |
+### Core Properties
 
-### Why Model Diversity Matters
+- **Never-forgetting memory**: OR-Set with add-wins semantics. Memories only accumulate, never shrink. Gossip propagates everything to all peers.
+- **Semantic sliding window**: Continuous background indexing via sentence-transformers. Retrieval is O(1) similarity search -- context window pressure is zero regardless of memory size.
+- **Trust-weighted synthesis**: E4 recursive trust lattice (from [crdt-merge](https://github.com/mgillr/crdt-merge)) scores every peer based on contribution quality. Higher-trust peers have more influence on converged answers.
+- **Privacy boundary**: Knowledge Wall ensures raw input never enters gossip. Only distilled insights cross the boundary. HMAC-bound provenance for auditability.
+- **Federation-ready**: Any node running crdt-merge >= 0.9.5 can join. Swarm DNA integrity verification prevents modified nodes from participating.
 
-Identical models produce correlated errors. When five copies of the same LLM reason
-about a problem, they make the same mistakes in the same places. Different model
-families have different training data, different architectures, different biases.
-Qwen thinks via chain-of-thought before answering. DeepSeek uses explicit reasoning
-tokens. Gemma comes from completely different training data. Five genuinely independent
-perspectives produce solutions none could reach alone.
+### What We Are Testing
 
-## Core Systems
+1. **Memory scaling** -- How many memories can a single spore hold before retrieval degrades? Current: 6,500+ per spore, 45,000+ aggregate across 7 nodes with no degradation.
+2. **Convergence quality** -- Does answer quality improve with more diverse models? Current: 7 model families, consistent convergence within 3-5 cycles.
+3. **Trust dynamics** -- How does the E4 trust lattice behave over time? Does trust distribution stabilize? Current: 53 converged tasks, trust range 0.40-0.70.
+4. **Swarm scaling** -- What happens at 20 nodes? 100? The architecture is designed for it but untested at scale.
+5. **Cross-commander federation** -- Multiple independent operators running their own swarms, connected via gossip. Untested in the wild.
 
-### 1. CRDT Persistent Memory (Never-Forgetting)
+## Quick Start
 
-Every reasoning delta, claim, synthesis, and trust event is stored in a
-`crdt-merge` OR-Set. Add-wins semantics means nothing is ever lost. Gossip
-protocol means every spore eventually has everything. The MerkleDAG provides
-cryptographic verification of memory integrity.
-
-```python
-from crdt_merge.core import ORSet
-from crdt_merge.merkle import MerkleTree
-
-memory = ORSet()
-merkle = MerkleTree()
-
-# Store a reasoning delta -- it can never be lost
-tag = memory.add({"task_id": "abc", "claim": "X > Y", "confidence": 0.85})
-merkle.insert(tag, hash(delta))
-
-# Gossip carries the delta to all peers automatically
-# Every spore converges to the same memory state
-```
-
-The sidecar indexer continuously builds embedding indices over the memory store,
-enabling instant semantic retrieval without stuffing the context window. A spore
-retrieves relevant prior reasoning by meaning, not by recency.
-
-### 2. Master Cognitive Protocol (Full-Spectrum Reasoning)
-
-Every spore is loaded with the complete Master Cognitive Protocol -- 913 lines,
-18 parts, covering Five-Phase Discipline, 11 Operational Mandates, and Three-Tier
-Synapse architecture. The cognitive role (Explorer, Synthesizer, Adversarial,
-Validator, Generalist, Brain) acts as a LENS on the full protocol, not a limitation.
-
-An Explorer applies the full protocol but emphasizes divergent search. A Validator
-applies the full protocol but emphasizes rigorous falsification. Every spore can
-reason about anything -- their role shapes their initial approach, not their ceiling.
-
-### 3. Semantic Convergence Engine
-
-Convergence is measured by semantic similarity between extracted claims, not keyword
-overlap. The engine uses sentence-transformers to embed claims and compute cosine
-similarity. When agreement exceeds the convergence threshold (default 0.70) and
-remains stable for 3 consecutive cycles, forced synthesis triggers.
-
-Progressive phases govern the reasoning arc:
-- **DIVERGE** (cycles 0-4): Maximum exploration, broad hypothesis generation
-- **DEEPEN** (cycles 5-9): Evidence gathering, claim refinement, adversarial challenge
-- **CONVERGE** (cycle 10+): Agreement-seeking synthesis, trust-weighted integration
-
-### 4. E4 Trust Lattice (Byzantine Detection)
-
-Trust between spores is managed by the `crdt-merge` E4 DeltaTrustLattice. Each
-interaction produces a trust delta. Consistently high-quality contributions increase
-trust. Low-quality or adversarial contributions decrease it. Trust scores weight
-how much influence each spore has during synthesis.
-
-The Validator spore (003) has dual-tier access: Gemma 3 27B for standard validation,
-GLM-4.7-Flash via Z.ai for deep validation of convergence quality. This gives the
-quality gate access to the most powerful reasoning available.
-
-### 5. Temporal Self-Learning (TAI Pattern)
-
-Each spore learns its own operational heartbeat -- cycle times, error rates,
-reasoning quality distribution, convergence speed. Deviations from the established
-temporal pattern trigger anomaly detection. A spore that suddenly produces lower
-quality reasoning or experiences unusual latency is flagged.
-
-This is the TAI (Temporal Accumulating Intelligence) pattern applied to cognitive
-health: the system knows what "normal" looks like because it has been observing
-itself continuously. No rules, no thresholds -- just temporal provenance.
-
-### 6. Trust-Weighted Gossip
-
-When gossip carries reasoning deltas between spores, the trust score of the
-originating spore weights how the receiving spore processes the information.
-High-trust deltas are incorporated directly. Low-trust deltas are treated as
-hypotheses requiring additional validation. This prevents a single unreliable
-spore from corrupting the collective.
-
-## Self-Evolution Protocol
-
-The swarm continuously improves itself:
-
-1. **Self-analysis tasks**: The swarm reasons about its own architecture and
-   proposes improvements
-2. **Convergence quality tracking**: Each synthesis is scored and tracked over time
-3. **Temporal baseline drift**: The TAI system detects gradual performance changes
-4. **Trust recalibration**: Trust scores evolve based on actual contribution quality
-5. **Memory-informed reasoning**: Prior reasoning shapes future approaches -- the
-   system learns from its own history
-
-The first self-analysis convergence (v3 swarm) produced 111 reasoning deltas across
-5 model families and independently validated model diversity as the highest-priority
-improvement before knowing it had already been implemented. The swarm co-evolved
-with its own recommendations.
-
-## Deployment
-
-### Prerequisites
-
-- HuggingFace account (Pro tier for private Spaces)
-- Python 3.10+
-- `pip install huggingface_hub`
-
-### Quick Start
+### Option 1: Deploy on HuggingFace Spaces (free tier)
 
 ```bash
-# Deploy 6-spore swarm with Z.ai brain tier on Validator + Brain
-python launch_swarm.py \
-  --count 6 \
-  --hf-token $HF_TOKEN \
-  --hf-owner Optitransfer \
-  --zai-key $ZAI_KEY \
-  --private
-
-# Monitor via Command Center
-# https://optitransfer-synapse-command-center.hf.space
+git clone https://github.com/mgillr/synapse-brain.git
+cd synapse-brain
+cp config.template.yaml config.yaml
+# Edit config.yaml -- at minimum set your HF token
+python launch_swarm.py --config config.yaml --count 3
 ```
 
-### Submitting Tasks
+This deploys 3 spores as free HF Spaces. No GPU needed -- inference runs via
+free-tier LLM APIs.
+
+### Option 2: Run locally
 
 ```bash
-curl -X POST https://optitransfer-synapse-spore-000.hf.space/api/task \
-  -H "Authorization: Bearer $HF_TOKEN" \
-  -H "Content-Type: application/json" \
-  -d '{"task": "Analyze the implications of recursive trust propagation in distributed systems"}'
+pip install -r requirements.txt
+python spore.py  # single spore, local mode
 ```
 
-Tasks propagate to all spores via gossip within one cycle. Each spore reasons
-independently, shares claims, and the swarm converges to a synthesized answer.
+### Option 3: Join the existing swarm
 
-### Command Center
+Edit `config.yaml` to point your spores at the existing Optitransfer core
+swarm as peers. Your nodes will automatically discover and gossip with the
+network.
 
-The Command Center is a private HuggingFace Space that aggregates state from all
-spores. It provides:
+## Configuration
 
-- Real-time spore health, clock, cycles, peers, deltas
-- Full conversation stream showing reasoning evolution across all spores
-- Trust matrix visualization
-- Task submission interface
-- Memory statistics and integrity verification
+Copy `config.template.yaml` and edit:
 
-## Infrastructure
+```yaml
+# Minimum viable config -- just your HF token
+hf_token: "hf_your_token_here"
 
-| Component | Platform | Role |
-|-----------|----------|------|
-| Spore 000-005 | HF Spaces (Private) | Reasoning agents |
-| Command Center | HF Spaces (Private) | Monitoring dashboard |
-| Memory Layer | crdt-merge 0.9.5 (PyPI) | Persistent CRDT state |
-| Brain Tier | Z.ai GLM-4.7-Flash | Deep validation (free) |
-| Worker LLMs | HF Inference API | Primary reasoning (free) |
+# Optional: add API keys for more model diversity
+# Leave blank to use free-tier providers only
+api_keys:
+  zai: ""          # Z.ai (GLM-4.7-Flash, free)
+  groq: ""         # Groq (Llama, free tier)
+  google_ai: ""    # Google AI Studio (Gemini, free tier)
+  cerebras: ""     # Cerebras (fast inference, free tier)
 
-## How It Differs
+# Swarm size (default: 3)
+count: 3
 
-Most multi-agent systems share a context window, use the same model, and forget
-everything between sessions. Synapse Brain:
+# Your identity as a commander
+commander: "your-username"
+```
 
-- **Never forgets**: CRDT memory is append-only, gossip-replicated, Merkle-verified
-- **Genuinely diverse**: 6 different model families, not 6 copies of GPT-4
-- **Trust-weighted**: Quality of contribution determines influence, not volume
-- **Self-aware**: Temporal self-learning detects its own performance drift
-- **Convergent**: Semantic similarity drives synthesis, not keyword matching
-- **Decentralized**: No orchestrator bottleneck, pure peer-to-peer mesh
+On first launch, the swarm will:
+1. Validate your config
+2. Deploy spores to your HF account
+3. Connect to the gossip mesh
+4. Start reasoning
+
+If no API keys are provided, spores fall back to free-tier providers
+(HF Router, Z.ai free models). You can add keys later -- spores pick
+them up on restart.
+
+## Project Structure
+
+```
+synapse-brain/
+  spore.py              # Core spore runtime (2,500+ lines)
+  cortex.py             # Local micro-LLM for Sentinel (Qwen3-4B)
+  knowledge_wall.py     # Privacy boundary (distillation + HMAC)
+  mcp_server.py         # MCP tool server (7 tools per spore)
+  federation.py         # Federation join/gossip protocol
+  launch_swarm.py       # Deployment script
+  config.template.yaml  # Configuration template
+  requirements.txt      # Dependencies
+  command-center/       # Monitoring dashboard (Gradio)
+  docs/                 # Architecture documentation
+  tests/                # Test suite
+```
+
+## How to Contribute
+
+See [CONTRIBUTING.md](CONTRIBUTING.md) for details. The short version:
+
+- **Run your own swarm** and report what you find
+- **Add new LLM providers** -- the provider interface is simple to extend
+- **Improve the semantic indexer** -- the sliding window is the bottleneck we expect to hit first
+- **Stress test memory scaling** -- we need data on degradation curves
+- **Build evaluation harnesses** -- measure convergence quality rigorously
+- **Try new reasoning protocols** -- the system prompt on each spore defines its reasoning strategy
+
+## Current Status
+
+This is experimental software. The foundation works:
+
+- 7-spore swarm has been running continuously with 53+ converged tasks
+- 6,500+ memories per spore with no retrieval degradation
+- Trust lattice stabilizing around 0.40-0.70 range
+- Knowledge Wall filtering correctly (crossings vs blocks tracked)
+- MCP server exposing 7 tools per spore for external integration
+- Sentinel with local Cortex (Qwen3-4B) for autonomous code deployment
+
+What we do not know yet:
+
+- Memory scaling ceiling (theoretical: millions; tested: ~7K)
+- Optimal spore count for convergence quality
+- Trust dynamics at scale (>20 peers)
+- Federation behavior across independent commanders
+- Real-world failure modes under adversarial conditions
 
 ## Dependencies
 
-- [crdt-merge](https://pypi.org/project/crdt-merge/) >= 0.9.5 -- CRDT memory + E4 trust
-- [sentence-transformers](https://www.sbert.net/) >= 3.0 -- semantic convergence
-- [httpx](https://www.python-httpx.org/) >= 0.27 -- gossip mesh
-- [numpy](https://numpy.org/) >= 1.24 -- vector operations
-
-## Patents
-
-Patent: UK Application No. GB 2607132.4, GB2608127.3
+- [crdt-merge >= 0.9.5](https://pypi.org/project/crdt-merge/) -- CRDT primitives, E4 trust lattice, Merkle provenance
+- sentence-transformers -- semantic embedding for memory retrieval
+- FastAPI + uvicorn -- spore HTTP server
+- httpx -- gossip mesh communication
+- numpy -- numerical operations
 
 ## License
 
-BSL 1.1 -- Change Date: 2028-04-08
+MIT License. See [LICENSE](LICENSE) for details.
+
+Uses [crdt-merge](https://pypi.org/project/crdt-merge/) as a dependency
+(separately licensed).

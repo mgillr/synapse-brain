@@ -2524,6 +2524,71 @@ async def api_cortex_status():
     return JSONResponse({"enabled": False, "role": MY_ROLE})
 
 
+@api.get("/api/sidecar")
+async def api_sidecar():
+    """Sidecar and memory subsystem performance metrics."""
+    import sys
+    
+    uptime_secs = time.time() - spore_state.start_time
+    corpus_len = len(memory._corpus)
+    orset_size = len(memory.orset.value) if memory.orset.value else 0
+    
+    # TF-IDF vocabulary size (features indexed)
+    try:
+        vocab_size = len(memory._tfidf.vocabulary_) if hasattr(memory._tfidf, 'vocabulary_') else 0
+    except Exception:
+        vocab_size = 0
+    
+    # Memory growth rate
+    mem_per_min = (corpus_len / max(uptime_secs, 1)) * 60
+    mem_per_hour = mem_per_min * 60
+    
+    # Merkle integrity
+    try:
+        root_hash = memory.index.root_hash()
+    except Exception:
+        root_hash = "N/A"
+    
+    # Clock state
+    clock_dict = memory.clock.to_dict()
+    clock_entries = len(clock_dict.get("clocks", {}))
+    
+    # Estimated memory footprint (rough: ~500 bytes per memory entry average)
+    est_memory_bytes = corpus_len * 500
+    
+    # Index health
+    needs_refit = memory._needs_refit
+    
+    # Projections
+    projections = {}
+    if mem_per_hour > 0:
+        for target in [10000, 50000, 100000, 500000, 1000000]:
+            remaining = max(0, target - corpus_len)
+            hours = remaining / mem_per_hour if mem_per_hour > 0 else float('inf')
+            projections[f"{target//1000}K"] = round(hours, 1)
+    
+    return JSONResponse({
+        "corpus_size": corpus_len,
+        "orset_size": orset_size,
+        "vocab_features": vocab_size,
+        "needs_refit": needs_refit,
+        "merkle_root": root_hash[:16] if isinstance(root_hash, str) else "N/A",
+        "clock_entries": clock_entries,
+        "growth_rate": {
+            "per_minute": round(mem_per_min, 2),
+            "per_hour": round(mem_per_hour, 1),
+            "per_day": round(mem_per_hour * 24, 0),
+        },
+        "estimated_footprint_mb": round(est_memory_bytes / 1024 / 1024, 2),
+        "projections_hours": projections,
+        "uptime_secs": round(uptime_secs),
+        "index_health": "refit_pending" if needs_refit else "current",
+        "monotonic_guarantee": True,
+        "sliding_window": "tfidf_cosine_similarity",
+        "retrieval_complexity": "O(n) with TF-IDF, O(log n) planned with HNSW",
+    })
+
+
 @api.get("/api/wall")
 async def api_wall_status():
     if knowledge_wall:

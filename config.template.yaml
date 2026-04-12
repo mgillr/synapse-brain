@@ -1,0 +1,76 @@
+# Synapse Brain -- Commander Configuration
+# Copy this file to config.yaml and edit before launching.
+#
+# Required: HuggingFace token (for deploying Spaces and gossip auth)
+# Optional: API keys for additional LLM providers
+#
+# Spores fall back to free-tier providers if no keys are set.
+# You can always add keys later -- spores pick them up on restart.
+
+# --- REQUIRED ---
+
+# Your HuggingFace token (read+write access)
+# Get one at: https://huggingface.co/settings/tokens
+hf_token: ""
+
+# --- OPTIONAL: API Keys ---
+# Leave blank to use free-tier only.
+# Each key unlocks additional model families for diversity.
+
+api_keys:
+  # Z.ai -- GLM-4.7-Flash and GLM-4.5-Flash (free)
+  # Get one at: https://z.ai
+  zai: ""
+
+  # Groq -- Llama, Mixtral, Gemma (generous free tier)
+  # Get one at: https://console.groq.com
+  groq: ""
+
+  # Google AI Studio -- Gemini models (free tier)
+  # Get one at: https://aistudio.google.com
+  google_ai: ""
+
+  # Cerebras -- fast inference (free tier)
+  # Get one at: https://cloud.cerebras.ai
+  cerebras: ""
+
+# --- DEPLOYMENT ---
+
+# Number of spores to deploy (default: 3)
+# More spores = more model diversity = better convergence
+# Free HF accounts can run multiple Spaces
+count: 3
+
+# Your commander identity (shown in the swarm topology)
+commander: ""
+
+# HuggingFace org to deploy under (optional, defaults to your username)
+hf_owner: ""
+
+# --- SWARM PEERS ---
+# Core swarm peers for initial gossip mesh connection.
+# Your spores will discover additional peers through gossip.
+# Leave default to connect to the Optitransfer core swarm.
+
+peers:
+  - "https://optitransfer-synapse-spore-000.hf.space"
+  - "https://optitransfer-synapse-spore-001.hf.space"
+  - "https://optitransfer-synapse-spore-002.hf.space"
+  - "https://optitransfer-synapse-spore-003.hf.space"
+  - "https://optitransfer-synapse-spore-004.hf.space"
+  - "https://optitransfer-synapse-spore-005.hf.space"
+  - "https://optitransfer-synapse-spore-006.hf.space"
+
+# --- ADVANCED ---
+
+# Enable Sentinel (autonomous code deployment) on one of your spores
+# Only enable if you trust the swarm consensus process
+sentinel: false
+
+# Enable local Cortex micro-LLM (Qwen3-4B) on Sentinel
+# Requires ~5.8 GB RAM on the Space
+cortex: false
+
+# Private mode -- your spores gossip with peers but do not accept
+# federation join requests from unknown nodes
+private: false

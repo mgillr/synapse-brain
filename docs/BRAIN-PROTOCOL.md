@@ -2,7 +2,7 @@
 
 ## Principle
 
-Every spore in the Synapse Brain swarm carries the complete Master Cognitive Protocol.
+Every spore in the Synapse Brain swarm carries the complete reasoning protocol.
 There is no split, no fragmentation, no role-limited subset. Each spore is a
 fully-loaded cognitive agent. The cognitive role (Explorer, Synthesizer, Adversarial,
 Validator, Generalist, Brain) acts as a lens that shapes emphasis, not a cage that
@@ -103,7 +103,7 @@ Each spore receives a system prompt with this structure:
 
 ```
 1. Identity block (spore ID, role, model)
-2. Full Master Cognitive Protocol (all 18 parts)
+2. Full reasoning protocol (all 18 parts)
 3. Role-specific emphasis instructions
 4. Current task context (from memory retrieval)
 5. Recent peer contributions (trust-weighted)
@@ -149,7 +149,7 @@ from prior experience.
 
 ## Self-Evolution Through Protocol
 
-The Master Cognitive Protocol includes self-improvement directives:
+The reasoning protocol includes self-improvement directives:
 
 - "Track your own reasoning quality over time"
 - "Identify patterns in your errors"

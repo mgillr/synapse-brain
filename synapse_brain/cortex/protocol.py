@@ -1,6 +1,6 @@
 """Synapse Cognitive Protocol -- the thinking architecture loaded into every spore.
 
-Distilled from the Master Cognitive Protocol (913 lines, 18 parts).
+Distilled from the reasoning protocol (913 lines, 18 parts).
 Each spore receives this as its reasoning framework. The protocol governs
 HOW a spore thinks, not WHAT it thinks about. Domain comes from the task.
 

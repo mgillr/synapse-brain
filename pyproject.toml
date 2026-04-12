@@ -6,7 +6,7 @@ build-backend = "hatchling.build"
 name = "synapse-brain"
 version = "0.1.0"
 description = "Distributed reasoning swarm with mathematically guaranteed convergence"
-license = {text = "BSL-1.1"}
+license = {text = "MIT"}
 requires-python = ">=3.10"
 authors = [{name = "Ryan Gillespie", email = "rgillespie83@icloud.com"}]
 dependencies = [
