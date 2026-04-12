@@ -348,6 +348,7 @@ def main():
         "groq": "GROQ_API_KEY",
         "google_ai": "GOOGLE_AI_KEY",
         "cerebras": "CEREBRAS_API_KEY",
+        "openrouter": "OPENROUTER_API_KEY",
         "mistral": "MISTRAL_API_KEY",
     }
     for cfg_key, env_key in key_map.items():
