@@ -99,7 +99,7 @@ def merge_config(args: argparse.Namespace) -> dict:
         api_keys["google_ai"] = args.google_key
     if args.cerebras_key:
         api_keys["cerebras"] = args.cerebras_key
-    if getattr(args, "mistral_key", None):
+    if args.mistral_key:
         api_keys["mistral"] = args.mistral_key
     cfg["api_keys"] = api_keys
 
@@ -107,11 +107,9 @@ def merge_config(args: argparse.Namespace) -> dict:
     if not cfg.get("hf_token"):
         cfg["hf_token"] = os.environ.get("HF_TOKEN", "")
     for env_key, cfg_key in [
-        ("XAI_API_KEY", "xai"), ("GOOGLE_AI_KEY", "google_ai"),
-        ("GITHUB_MODELS_TOKEN", "github_models"),
-        ("ZAI_API_KEY", "zai"), ("OPENROUTER_KEY", "openrouter"),
-        ("LLMAPI_KEY", "llmapi"), ("GROQ_API_KEY", "groq"),
-        ("CEREBRAS_API_KEY", "cerebras"),
+        ("ZAI_API_KEY", "zai"), ("XAI_API_KEY", "xai"),
+        ("GROQ_API_KEY", "groq"), ("GOOGLE_AI_KEY", "google_ai"),
+        ("CEREBRAS_API_KEY", "cerebras"), ("MISTRAL_API_KEY", "mistral"),
     ]:
         if not api_keys.get(cfg_key) and os.environ.get(env_key):
             api_keys[cfg_key] = os.environ[env_key]
@@ -242,6 +240,8 @@ def generate_spore_app(
         .replace("__PRIMARY_MODEL__", primary_model)
     )
 
+    is_sentinel = ROLE_NAMES[spore_index] == "Sentinel"
+
     requirements_txt = (
         "crdt-merge>=0.9.5\n"
         "httpx>=0.27\n"
@@ -250,7 +250,10 @@ def generate_spore_app(
         "fastapi>=0.115\n"
         "uvicorn>=0.30\n"
     )
+    if is_sentinel:
+        requirements_txt += "llama-cpp-python>=0.3.0\n"
 
+    python_line = 'python_version: "3.10"\n' if is_sentinel else ""
     readme_md = (
         "---\n"
         "title: Synapse Brain Spore\n"
@@ -259,6 +262,7 @@ def generate_spore_app(
         "colorTo: blue\n"
         "sdk: gradio\n"
         'sdk_version: "5.25.2"\n'
+        f"{python_line}"
         "app_file: app.py\n"
         "pinned: false\n"
         "---\n\n"
@@ -346,14 +350,13 @@ def main():
     # Build secrets -- ALL spores get ALL keys for maximum fallback
     secrets = {"HF_TOKEN": token}
     key_map = {
-        "xai": "XAI_API_KEY",
-        "google_ai": "GOOGLE_AI_KEY",
-        "github_models": "GITHUB_MODELS_TOKEN",
         "zai": "ZAI_API_KEY",
-        "openrouter": "OPENROUTER_KEY",
-        "llmapi": "LLMAPI_KEY",
+        "xai": "XAI_API_KEY",
         "groq": "GROQ_API_KEY",
+        "google_ai": "GOOGLE_AI_KEY",
         "cerebras": "CEREBRAS_API_KEY",
+        "openrouter": "OPENROUTER_API_KEY",
+        "mistral": "MISTRAL_API_KEY",
     }
     for cfg_key, env_key in key_map.items():
         if api_keys.get(cfg_key):
