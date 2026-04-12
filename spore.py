@@ -137,7 +137,23 @@ EXTERNAL_PROVIDERS = {
         "model": "llama3.3-70b",
         "tier": "worker",
     },
+    "google_ai": {
+        "env": "GOOGLE_AI_KEY",
+        "url": "https://generativelanguage.googleapis.com/v1beta/openai/chat/completions",
+        "model": "gemini-2.0-flash",
+        "tier": "worker",
+    },
+    "openrouter": {
+        "env": "OPENROUTER_API_KEY",
+        "url": "https://openrouter.ai/api/v1/chat/completions",
+        "model": "google/gemini-2.0-flash-exp:free",
+        "tier": "worker",
+    },
 }
+
+# Rate-limit cooldown tracking
+_provider_cooldowns: dict[str, float] = {}
+COOLDOWN_SECONDS = 300
 
 FALLBACK_MODELS = [PRIMARY_MODEL] + [m for m in ALL_HF_MODELS if m != PRIMARY_MODEL]
 log.info("Primary model: %s | Role: %s", PRIMARY_MODEL, MY_ROLE)
@@ -621,13 +637,13 @@ async def call_llm(prompt, system="", tier="any"):
                 log.warning("Model %s: %s", model.split("/")[-1], str(e)[:80])
                 continue
 
-    # Last resort: try Z.ai free models regardless of tier
-    if tier != "brain":
-        for name in ("zai_brain", "zai_fallback"):
-            conf = EXTERNAL_PROVIDERS.get(name, {})
-            key = os.environ.get(conf.get("env", ""))
-            if not key:
-                continue
+    # Last resort: try ALL external providers regardless of tier
+    for name, conf in EXTERNAL_PROVIDERS.items():
+        key = os.environ.get(conf.get("env", ""))
+        if not key:
+            continue
+        if time.time() < _provider_cooldowns.get(name, 0):
+            continue
             try:
                 async with httpx.AsyncClient(timeout=90.0) as client:
                     messages = []
@@ -647,8 +663,12 @@ async def call_llm(prompt, system="", tier="any"):
                         ms = (time.time() - start) * 1000
                         return {"text": text, "provider": name, "model": conf["model"],
                                 "tier": "fallback", "latency_ms": round(ms, 1)}
+                    else:
+                        _provider_cooldowns[name] = time.time() + COOLDOWN_SECONDS
             except Exception as e:
                 log.warning("Fallback %s: %s", name, str(e)[:80])
+                if "429" in str(e) or "rate" in str(e).lower() or "credit" in str(e).lower():
+                    _provider_cooldowns[name] = time.time() + COOLDOWN_SECONDS
 
     return {"text": "[all models failed]", "provider": "none", "model": "none",
             "tier": "none", "latency_ms": 0}
