@@ -145,9 +145,15 @@ def get_hf_api(token: str) -> HfApi:
 
 
 def get_hf_username(token: str) -> str:
-    api = get_hf_api(token)
-    info = api.whoami()
-    return info.get("name", "unknown")
+    try:
+        api = get_hf_api(token)
+        info = api.whoami()
+        return info.get("name", "unknown")
+    except Exception as e:
+        print(f"ERROR: Could not authenticate with HuggingFace.")
+        print(f"  Check your token is valid: https://huggingface.co/settings/tokens")
+        print(f"  Detail: {e}")
+        sys.exit(1)
 
 
 def create_space_repo(owner: str, name: str, token: str, private: bool = True) -> str:
@@ -317,8 +323,13 @@ def main():
     print("Synapse Brain Swarm Launcher")
     print("=" * 40)
 
-    # Detect owner
-    owner = cfg.get("hf_owner") or cfg.get("commander") or get_hf_username(token)
+    # Detect owner -- skip API call in dry-run if not needed
+    owner = cfg.get("hf_owner") or cfg.get("commander")
+    if not owner:
+        if cfg.get("dry_run"):
+            owner = "dry-run-user"
+        else:
+            owner = get_hf_username(token)
     print(f"Account:  {owner}")
     print(f"Spores:   {count}")
     print(f"Private:  {private}")
