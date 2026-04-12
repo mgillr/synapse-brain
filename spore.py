@@ -3136,6 +3136,46 @@ async def api_sidecar():
     })
 
 
+@api.get("/api/convergence")
+async def api_convergence():
+    """Convergence metrics across all active tasks."""
+    task_convergence = []
+    for tid, task in list(spore_state.tasks.items()):
+        latest = []
+        for d in task.deltas[-20:]:
+            content = d.get("content", "")
+            hypothesis = d.get("hypothesis", "")
+            if hypothesis and len(hypothesis.strip()) > 10:
+                latest.append({"hypothesis": hypothesis, "content": content})
+            elif content and len(content.strip()) > 10:
+                latest.append({"content": content})
+        agreement = convergence.measure(latest) if len(latest) >= 2 else 0.0
+        velocity = convergence.velocity(task.agreement_history)
+        cycle = task.cycle
+        phase = get_phase_adaptive(cycle, task.agreement_history, convergence)
+        task_convergence.append({
+            "task_id": tid,
+            "question": (task.question[:120] + "...") if len(task.question) > 120 else task.question,
+            "cycle": cycle,
+            "phase": phase,
+            "agreement": round(agreement, 4),
+            "velocity": round(velocity, 4),
+            "converged": task.converged,
+            "delta_count": len(task.deltas),
+            "history": [round(a, 4) for a in task.agreement_history[-10:]],
+        })
+    global_agreement = 0.0
+    if task_convergence:
+        global_agreement = sum(t["agreement"] for t in task_convergence) / len(task_convergence)
+    return JSONResponse({
+        "spore": SPORE_ID,
+        "global_agreement": round(global_agreement, 4),
+        "active_tasks": len(task_convergence),
+        "converged_tasks": sum(1 for t in task_convergence if t["converged"]),
+        "tasks": task_convergence,
+    })
+
+
 @api.get("/api/wall")
 async def api_wall_status():
     if knowledge_wall:

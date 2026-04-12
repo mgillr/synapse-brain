@@ -480,12 +480,19 @@ def mount_mcp_routes(fastapi_app, mcp_server: SynapseMCPServer):
         return JSONResponse(response)
 
     @fastapi_app.get("/mcp")
-    async def mcp_sse():
-        """SSE endpoint placeholder for future streaming support."""
-        return JSONResponse(
-            {"error": "SSE transport not yet implemented. Use POST /mcp."},
-            status_code=501,
-        )
+    async def mcp_info_root():
+        """MCP server discovery endpoint. Returns capabilities and available tools."""
+        return JSONResponse({
+            "status": "ok",
+            "spore": mcp_server.spore_id,
+            "role": mcp_server.role,
+            "model": mcp_server.model,
+            "protocol_version": MCP_VERSION,
+            "transport": "json-rpc",
+            "tools": [t.name for t in mcp_server.tools.values()],
+            "tool_count": len(mcp_server.tools),
+            "usage": "POST /mcp with JSON-RPC 2.0 body. GET /mcp/info for detailed server info.",
+        })
 
     @fastapi_app.get("/mcp/info")
     async def mcp_info():
