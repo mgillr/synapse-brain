@@ -1261,6 +1261,9 @@ def start_heartbeat():
 # ---------------------------------------------------------------------------
 if MY_ROLE == "sentinel":
     import ast as _ast
+    import base64 as _b64
+    from io import BytesIO
+    from huggingface_hub import HfApi
 
     class SentinelState:
         """Tracks sentinel monitoring, proposals, and deployment history."""
@@ -1275,6 +1278,8 @@ if MY_ROLE == "sentinel":
             self.CONSENSUS_TIMEOUT = 600
             self.DEPLOY_COOLDOWN = 1800
             self.health_baseline = {}
+            self.deployment_log = []  # full details of every deployment
+            self.rollback_store = {}  # space_id -> original content for rollback
 
     _sentinel = SentinelState()
 
@@ -1395,7 +1400,10 @@ RULES:
 - Do NOT re-propose changes already proposed or deployed
 - Config changes: HEARTBEAT_INTERVAL (current: 20, bounds: 10-120)
 - Prompt changes: reasoning prompt adjustments
-- Code changes: stored for manual review (safety gate)
+- Code changes: provide target_file, old_text (exact text to find), new_text (replacement)
+  The old_text MUST be an exact substring of the current file. Copy it character-for-character.
+  The new_text replaces old_text. Keep surrounding context intact.
+  Only ONE search-replace pair per proposal. Make it small and precise.
 
 Respond ONLY with this JSON (no other text):
 {{
@@ -1406,7 +1414,10 @@ Respond ONLY with this JSON (no other text):
   "target": "Specific variable or component to change",
   "current_value": "Current value or behavior",
   "proposed_value": "Proposed new value or behavior",
-  "code_patch": "For code changes only: exact replacement Python. Empty string for config/prompt.",
+  "target_file": "For code changes: filename to modify (e.g. spore.py). Empty for config/prompt.",
+  "old_text": "For code changes: exact substring to find in target_file. Empty for config/prompt.",
+  "new_text": "For code changes: replacement text. Empty for config/prompt.",
+  "code_patch": "DEPRECATED -- use old_text/new_text instead. Keep empty.",
   "success_criterion": "Measurable metric to evaluate in next analysis cycle",
   "risk": "low|medium|high",
   "confidence": 0.0
@@ -1483,6 +1494,9 @@ Respond ONLY with this JSON (no other text):
             "submitted_at": time.time(),
             "change_type": parsed.get("change_type", "unknown"),
             "code_patch": parsed.get("code_patch", ""),
+            "target_file": parsed.get("target_file", "spore.py"),
+            "old_text": parsed.get("old_text", ""),
+            "new_text": parsed.get("new_text", ""),
         }
         _sentinel.active_proposal = proposal_id
 
@@ -1537,7 +1551,7 @@ Respond ONLY with this JSON (no other text):
         return "pending"
 
     async def sentinel_test_change(proposal):
-        """Fault-finding test harness for proposed changes."""
+        """Fault-finding test harness -- validates against real file content from GitHub."""
         results = {"syntax": False, "safety": False, "bounds": False, "smoke": False}
         change_type = proposal.get("change_type", "unknown")
         analysis = proposal.get("analysis", {})
@@ -1545,10 +1559,7 @@ Respond ONLY with this JSON (no other text):
         if change_type == "config":
             target = analysis.get("target", "")
             value = analysis.get("proposed_value", "")
-            # Validate config bounds
-            bounds = {
-                "HEARTBEAT_INTERVAL": (10, 120),
-            }
+            bounds = {"HEARTBEAT_INTERVAL": (10, 120)}
             if target in bounds:
                 try:
                     v = int(value) if isinstance(value, str) else value
@@ -1560,7 +1571,6 @@ Respond ONLY with this JSON (no other text):
                 except (ValueError, TypeError):
                     pass
             else:
-                # Unknown config -- conservative pass (will still need consensus)
                 results = {k: True for k in results}
 
         elif change_type == "prompt":
@@ -1571,23 +1581,70 @@ Respond ONLY with this JSON (no other text):
             results["smoke"] = results["syntax"] and results["safety"]
 
         elif change_type == "code":
-            patch = proposal.get("code_patch", "")
-            if not patch:
+            old_text = proposal.get("old_text", "") or analysis.get("old_text", "")
+            new_text = proposal.get("new_text", "") or analysis.get("new_text", "")
+            target_file = proposal.get("target_file", "") or analysis.get("target_file", "spore.py")
+
+            if not old_text or not new_text:
+                log.warning("Sentinel: code patch missing old_text/new_text")
+                memory.remember("Sentinel test FAIL: code patch missing old_text/new_text",
+                                metadata={"type": "sentinel_test", "result": "fail"})
                 return results
-            # Syntax check
+
+            # Fetch the real file from GitHub to validate against
+            gh_token = os.environ.get("GITHUB_TOKEN", "")
+            if not gh_token:
+                log.error("Sentinel: no GITHUB_TOKEN -- cannot validate code patch")
+                return results
+
             try:
-                _ast.parse(patch)
+                headers = {"Authorization": f"token {gh_token}", "Accept": "application/vnd.github.v3+json"}
+                async with httpx.AsyncClient(timeout=20, headers=headers) as gh:
+                    resp = await gh.get(f"https://api.github.com/repos/mgillr/synapse-brain/contents/{target_file}")
+                    if resp.status_code != 200:
+                        log.error("Sentinel: failed to fetch %s from GitHub: %d", target_file, resp.status_code)
+                        return results
+                    file_data = resp.json()
+                    current_content = _b64.b64decode(file_data["content"]).decode()
+            except Exception as e:
+                log.error("Sentinel: GitHub fetch failed: %s", e)
+                return results
+
+            # Check old_text exists in the file
+            if old_text not in current_content:
+                log.warning("Sentinel: old_text not found in %s -- patch would fail", target_file)
+                results["syntax"] = False
+                memory.remember(f"Sentinel test FAIL: old_text not found in {target_file}",
+                                metadata={"type": "sentinel_test", "result": "fail"})
+                return results
+
+            # Apply the patch and check full-file syntax
+            patched = current_content.replace(old_text, new_text, 1)
+            try:
+                _ast.parse(patched)
                 results["syntax"] = True
             except SyntaxError as e:
-                log.error("Sentinel: code patch syntax error: %s", e)
+                log.error("Sentinel: patched %s has syntax error: %s", target_file, e)
+                memory.remember(f"Sentinel test FAIL: syntax error after patch: {e}",
+                                metadata={"type": "sentinel_test", "result": "fail"})
                 return results
-            # Safety check: no dangerous imports/calls
-            dangerous = ["os.system", "subprocess", "eval(", "exec(", "__import__", "shutil.rmtree"]
-            results["safety"] = not any(d in patch for d in dangerous)
-            # Bounds check
-            results["bounds"] = 10 < len(patch) < 100000
-            # Smoke: passes all above
+
+            # Safety: no dangerous patterns in the new_text
+            dangerous = ["os.system(", "subprocess.", "eval(", "exec(", "__import__(", "shutil.rmtree",
+                          "os.remove(", "os.unlink(", "open(", "GITHUB_TOKEN", "HF_TOKEN", "API_KEY"]
+            bad = [d for d in dangerous if d in new_text and d not in old_text]
+            results["safety"] = len(bad) == 0
+            if bad:
+                log.warning("Sentinel: code patch introduces dangerous patterns: %s", bad)
+
+            # Bounds: patch is reasonable size
+            results["bounds"] = len(new_text) < 50000 and len(old_text) < 50000
             results["smoke"] = all([results["syntax"], results["safety"], results["bounds"]])
+
+            # Store the validated content for deploy phase
+            proposal["_validated_content"] = patched
+            proposal["_original_content"] = current_content
+            proposal["_file_sha"] = file_data["sha"]
 
         all_pass = all(results.values())
         memory.remember(
@@ -1597,9 +1654,16 @@ Respond ONLY with this JSON (no other text):
         return results
 
     async def sentinel_deploy(proposal):
-        """Deploy an approved, tested change."""
+        """Deploy an approved, tested change. Full autonomous pipeline for code changes."""
         change_type = proposal.get("change_type", "unknown")
         analysis = proposal.get("analysis", {})
+        deploy_record = {
+            "time": time.time(), "change_type": change_type,
+            "description": proposal.get("description", ""),
+            "status": "started", "github_sha": None,
+            "spaces_deployed": [], "spaces_failed": [],
+            "rolled_back": False,
+        }
 
         if change_type == "config":
             target = analysis.get("target", "")
@@ -1614,9 +1678,11 @@ Respond ONLY with this JSON (no other text):
                             deployed_to.append(peer_url.split("/")[-1] if "/" in peer_url else peer_url)
                     except Exception as e:
                         log.warning("Sentinel: config deploy to %s failed: %s", peer_url, e)
-            # Apply locally too
             sentinel_apply_config(target, value)
             deployed_to.append("self")
+            deploy_record["status"] = "success"
+            deploy_record["spaces_deployed"] = deployed_to
+            _sentinel.deployment_log.append(deploy_record)
             memory.remember(
                 f"Sentinel deployed config: {target}={value} to {len(deployed_to)} spores",
                 metadata={"type": "sentinel_deployment", "target": target, "count": len(deployed_to)},
@@ -1630,23 +1696,206 @@ Respond ONLY with this JSON (no other text):
                 f"new prompt guidance: {analysis.get('proposed_value', '')}",
                 metadata={"type": "sentinel_prompt_change", "target": analysis.get("target", "")},
             )
+            deploy_record["status"] = "success"
+            _sentinel.deployment_log.append(deploy_record)
             log.info("Sentinel: prompt change stored in CRDT memory (propagates via gossip)")
             return True
 
         elif change_type == "code":
-            # Safety gate: code changes stored for manual review, not auto-deployed
+            gh_token = os.environ.get("GITHUB_TOKEN", "")
+            hf_token = os.environ.get("HF_TOKEN", "")
+            if not gh_token:
+                log.error("Sentinel: GITHUB_TOKEN not set -- cannot deploy code")
+                deploy_record["status"] = "blocked_no_token"
+                _sentinel.deployment_log.append(deploy_record)
+                return False
+
+            target_file = proposal.get("target_file", "") or analysis.get("target_file", "spore.py")
+            old_text = proposal.get("old_text", "") or analysis.get("old_text", "")
+            new_text = proposal.get("new_text", "") or analysis.get("new_text", "")
+            validated_content = proposal.get("_validated_content")
+            original_content = proposal.get("_original_content")
+            file_sha = proposal.get("_file_sha")
+
+            if not validated_content:
+                log.error("Sentinel: no validated content from test phase -- aborting deploy")
+                deploy_record["status"] = "no_validated_content"
+                _sentinel.deployment_log.append(deploy_record)
+                return False
+
+            # ---- STEP 1: Commit to GitHub (canonical source) ----
+            commit_msg = proposal.get("description", "optimization")[:72]
+            gh_headers = {"Authorization": f"token {gh_token}", "Accept": "application/vnd.github.v3+json"}
+            try:
+                encoded = _b64.b64encode(validated_content.encode()).decode()
+                async with httpx.AsyncClient(timeout=30, headers=gh_headers) as gh:
+                    resp = await gh.put(
+                        f"https://api.github.com/repos/mgillr/synapse-brain/contents/{target_file}",
+                        json={
+                            "message": commit_msg,
+                            "content": encoded,
+                            "sha": file_sha,
+                            "committer": {"name": "mgillr", "email": "rgillespie83@icloud.com"},
+                        },
+                    )
+                    if resp.status_code not in (200, 201):
+                        log.error("Sentinel: GitHub commit failed: %d %s", resp.status_code, resp.text[:300])
+                        deploy_record["status"] = f"github_fail_{resp.status_code}"
+                        _sentinel.deployment_log.append(deploy_record)
+                        return False
+                    commit_data = resp.json()
+                    commit_sha = commit_data.get("commit", {}).get("sha", "unknown")
+                    new_file_sha = commit_data.get("content", {}).get("sha", file_sha)
+            except Exception as e:
+                log.error("Sentinel: GitHub commit exception: %s", e)
+                deploy_record["status"] = f"github_exception"
+                _sentinel.deployment_log.append(deploy_record)
+                return False
+
+            deploy_record["github_sha"] = commit_sha
+            log.info("Sentinel: committed %s to GitHub (%s)", target_file, commit_sha[:8])
             memory.remember(
-                f"Sentinel code change APPROVED and TESTED but requires manual deployment: "
-                f"{analysis.get('hypothesis', '')}",
-                metadata={
-                    "type": "sentinel_code_approved",
-                    "patch": proposal.get("code_patch", "")[:2000],
-                },
+                f"Sentinel committed {target_file} to GitHub: {commit_sha[:8]} -- {commit_msg}",
+                metadata={"type": "sentinel_commit", "sha": commit_sha, "file": target_file},
             )
-            log.info("Sentinel: code change approved+tested, stored for manual review")
+
+            # ---- STEP 2: Rolling deploy to HF Spaces ----
+            hf_api = HfApi(token=hf_token)
+            all_spaces = [f"Optitransfer/synapse-spore-{i:03d}" for i in range(7)]
+            my_space = f"Optitransfer/synapse-spore-{SPORE_INDEX:03d}"
+            rollback_store = {}
+
+            for space in all_spaces:
+                try:
+                    # Download current app.py to store for rollback
+                    from huggingface_hub import hf_hub_download
+                    local_path = hf_hub_download(
+                        repo_id=space, filename="app.py",
+                        repo_type="space", token=hf_token,
+                        cache_dir="/tmp/sentinel_cache",
+                    )
+                    with open(local_path, "r") as f:
+                        current_app = f.read()
+                    rollback_store[space] = current_app
+
+                    # Apply the same old_text -> new_text patch to this Space's app.py
+                    if old_text and old_text in current_app:
+                        patched_app = current_app.replace(old_text, new_text, 1)
+                    else:
+                        log.warning("Sentinel: old_text not found in %s app.py -- skipping", space)
+                        deploy_record["spaces_failed"].append({"space": space, "reason": "old_text_not_found"})
+                        continue
+
+                    # Syntax check the patched app.py
+                    try:
+                        _ast.parse(patched_app)
+                    except SyntaxError as e:
+                        log.error("Sentinel: patched %s app.py has syntax error: %s", space, e)
+                        deploy_record["spaces_failed"].append({"space": space, "reason": f"syntax_{e}"})
+                        continue
+
+                    # Upload patched app.py
+                    hf_api.upload_file(
+                        path_or_fileobj=BytesIO(patched_app.encode()),
+                        path_in_repo="app.py",
+                        repo_id=space,
+                        repo_type="space",
+                        commit_message=commit_msg,
+                    )
+                    deploy_record["spaces_deployed"].append(space)
+                    log.info("Sentinel: deployed to %s", space)
+
+                except Exception as e:
+                    log.error("Sentinel: deploy to %s failed: %s", space, e)
+                    deploy_record["spaces_failed"].append({"space": space, "reason": str(e)[:200]})
+
+            _sentinel.rollback_store = rollback_store
+
+            if not deploy_record["spaces_deployed"]:
+                log.error("Sentinel: no Spaces deployed -- aborting")
+                deploy_record["status"] = "no_spaces_deployed"
+                _sentinel.deployment_log.append(deploy_record)
+                # Revert GitHub commit
+                await _sentinel_revert_github(gh_token, target_file, original_content, new_file_sha, commit_msg)
+                return False
+
+            # ---- STEP 3: Wait for rebuilds + health check ----
+            log.info("Sentinel: waiting 120s for Space rebuilds (%d spaces)...",
+                     len(deploy_record["spaces_deployed"]))
+            await asyncio.sleep(120)
+
+            health = await sentinel_verify_health()
+            healthy_count = sum(1 for v in health.values() if v)
+            total = len(health)
+            deploy_record["post_health"] = f"{healthy_count}/{total}"
+
+            # ---- STEP 4: Rollback if <50% healthy ----
+            if healthy_count < total * 0.5:
+                log.error("Sentinel: only %d/%d healthy -- ROLLING BACK", healthy_count, total)
+                deploy_record["status"] = "rolled_back"
+                deploy_record["rolled_back"] = True
+
+                # Rollback HF Spaces
+                for space, orig_content in rollback_store.items():
+                    if space in [s for s in deploy_record["spaces_deployed"]]:
+                        try:
+                            hf_api.upload_file(
+                                path_or_fileobj=BytesIO(orig_content.encode()),
+                                path_in_repo="app.py",
+                                repo_id=space,
+                                repo_type="space",
+                                commit_message=f"Rollback: {commit_msg}",
+                            )
+                            log.info("Sentinel: rolled back %s", space)
+                        except Exception as e:
+                            log.error("Sentinel: rollback of %s failed: %s", space, e)
+
+                # Revert GitHub commit
+                await _sentinel_revert_github(gh_token, target_file, original_content, new_file_sha, commit_msg)
+
+                memory.remember(
+                    f"Sentinel ROLLBACK: {commit_msg} -- only {healthy_count}/{total} healthy",
+                    metadata={"type": "sentinel_rollback", "sha": commit_sha},
+                )
+                _sentinel.deployment_log.append(deploy_record)
+                return False
+
+            # ---- SUCCESS ----
+            deploy_record["status"] = "success"
+            _sentinel.deployment_log.append(deploy_record)
+            memory.remember(
+                f"Sentinel deployed code change: {commit_msg} -- "
+                f"{len(deploy_record['spaces_deployed'])} spaces, health {healthy_count}/{total}",
+                metadata={"type": "sentinel_deployment", "sha": commit_sha,
+                           "spaces": len(deploy_record["spaces_deployed"])},
+            )
+            log.info("Sentinel: code deploy SUCCESS -- %d spaces, health %d/%d",
+                     len(deploy_record["spaces_deployed"]), healthy_count, total)
             return True
 
         return False
+
+    async def _sentinel_revert_github(gh_token, target_file, original_content, current_sha, original_msg):
+        """Revert a GitHub file to its original content."""
+        try:
+            gh_headers = {"Authorization": f"token {gh_token}", "Accept": "application/vnd.github.v3+json"}
+            encoded = _b64.b64encode(original_content.encode()).decode()
+            async with httpx.AsyncClient(timeout=30, headers=gh_headers) as gh:
+                resp = await gh.put(
+                    f"https://api.github.com/repos/mgillr/synapse-brain/contents/{target_file}",
+                    json={
+                        "message": f"Revert: {original_msg}",
+                        "content": encoded,
+                        "sha": current_sha,
+                        "committer": {"name": "mgillr", "email": "rgillespie83@icloud.com"},
+                    },
+                )
+                if resp.status_code in (200, 201):
+                    log.info("Sentinel: GitHub revert successful for %s", target_file)
+                else:
+                    log.error("Sentinel: GitHub revert failed: %d", resp.status_code)
+        except Exception as e:
+            log.error("Sentinel: GitHub revert exception: %s", e)
 
     def sentinel_apply_config(key, value):
         """Apply a runtime configuration change locally."""
@@ -1703,11 +1952,7 @@ Respond ONLY with this JSON (no other text):
                             if success:
                                 prop["status"] = "deployed"
                                 _sentinel.deploy_cooldown = time.time()
-                                _sentinel.deployments.append({
-                                    "proposal_id": pid,
-                                    "time": time.time(),
-                                    "type": prop.get("change_type"),
-                                })
+                                # deployment_log is populated by sentinel_deploy itself
 
                                 # Post-deploy health check
                                 await asyncio.sleep(30)
@@ -2007,10 +2252,26 @@ async def api_sentinel_status():
             }
             for pid, p in _sentinel.proposals.items()
         },
-        "total_deployments": len(_sentinel.deployments),
+        "total_deployments": len(_sentinel.deployment_log),
         "telemetry_snapshots": len(_sentinel.telemetry),
         "last_analysis": _sentinel.last_analysis,
         "deploy_cooldown_remaining": max(0, _sentinel.DEPLOY_COOLDOWN - (time.time() - _sentinel.deploy_cooldown)),
+    })
+
+
+@api.get("/api/sentinel/deployments")
+async def api_sentinel_deployments():
+    """Full deployment log with details."""
+    if MY_ROLE != "sentinel":
+        return JSONResponse({"sentinel": False, "deployments": []})
+    return JSONResponse({
+        "sentinel": True,
+        "deployments": _sentinel.deployment_log[-50:],
+        "rollback_spaces": list(_sentinel.rollback_store.keys()),
+        "total_deployments": len(_sentinel.deployment_log),
+        "successful": sum(1 for d in _sentinel.deployment_log if d.get("status") == "success"),
+        "failed": sum(1 for d in _sentinel.deployment_log if d.get("status") != "success"),
+        "rolled_back": sum(1 for d in _sentinel.deployment_log if d.get("rolled_back")),
     })
 
 
