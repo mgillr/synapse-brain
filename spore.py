@@ -99,6 +99,8 @@ THINKING_MODELS = {
     "Qwen/Qwen3-235B-A22B",
     "Qwen/Qwen3-32B",
     "Qwen/QwQ-32B",
+    "glm-4.5-flash",
+    "glm-4.7-flash",
 }
 
 ALL_HF_MODELS = [
@@ -644,31 +646,31 @@ async def call_llm(prompt, system="", tier="any"):
             continue
         if time.time() < _provider_cooldowns.get(name, 0):
             continue
-            try:
-                async with httpx.AsyncClient(timeout=90.0) as client:
-                    messages = []
-                    if system:
-                        messages.append({"role": "system", "content": system})
-                    messages.append({"role": "user", "content": prompt})
-                    start = time.time()
-                    resp = await client.post(
-                        conf["url"],
-                        headers={"Authorization": f"Bearer {key}"},
-                        json={"model": conf["model"], "messages": messages,
-                              "max_tokens": 2048, "temperature": 0.7},
-                    )
-                    resp.raise_for_status()
-                    text = extract_response_text(resp.json(), conf["model"])
-                    if text.strip():
-                        ms = (time.time() - start) * 1000
-                        return {"text": text, "provider": name, "model": conf["model"],
-                                "tier": "fallback", "latency_ms": round(ms, 1)}
-                    else:
-                        _provider_cooldowns[name] = time.time() + COOLDOWN_SECONDS
-            except Exception as e:
-                log.warning("Fallback %s: %s", name, str(e)[:80])
-                if "429" in str(e) or "rate" in str(e).lower() or "credit" in str(e).lower():
+        try:
+            async with httpx.AsyncClient(timeout=90.0) as client:
+                messages = []
+                if system:
+                    messages.append({"role": "system", "content": system})
+                messages.append({"role": "user", "content": prompt})
+                start = time.time()
+                resp = await client.post(
+                    conf["url"],
+                    headers={"Authorization": f"Bearer {key}"},
+                    json={"model": conf["model"], "messages": messages,
+                          "max_tokens": 2048, "temperature": 0.7},
+                )
+                resp.raise_for_status()
+                text = extract_response_text(resp.json(), conf["model"])
+                if text.strip():
+                    ms = (time.time() - start) * 1000
+                    return {"text": text, "provider": name, "model": conf["model"],
+                            "tier": "fallback", "latency_ms": round(ms, 1)}
+                else:
                     _provider_cooldowns[name] = time.time() + COOLDOWN_SECONDS
+        except Exception as e:
+            log.warning("Fallback %s: %s", name, str(e)[:80])
+            if "429" in str(e) or "rate" in str(e).lower() or "credit" in str(e).lower():
+                _provider_cooldowns[name] = time.time() + COOLDOWN_SECONDS
 
     return {"text": "[all models failed]", "provider": "none", "model": "none",
             "tier": "none", "latency_ms": 0}
