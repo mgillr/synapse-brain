@@ -865,10 +865,84 @@ def refresh_conversation_only():
     return '<div style="color:#64748b;padding:12px;text-align:center;font-size:11px">No active conversation.</div>'
 
 
-def submit_prompt(prompt):
+def chunk_document(file_path, max_chunk_chars=3000, overlap=200):
+    """Read and chunk a document for swarm analysis.
+
+    Supports: .txt, .md, .py, .json, .csv, .html, .log and other text files.
+    Chunks at paragraph/section boundaries with overlap for context continuity.
+    Returns list of chunk strings.
+    """
+    if not file_path:
+        return []
+    try:
+        with open(file_path, "r", encoding="utf-8", errors="replace") as f:
+            text = f.read()
+    except Exception as e:
+        return [f"[Document read error: {e}]"]
+
+    if not text.strip():
+        return []
+
+    # Split on double newlines (paragraphs/sections)
+    paragraphs = [p.strip() for p in text.split("\n\n") if p.strip()]
+    if not paragraphs:
+        paragraphs = [text]
+
+    chunks = []
+    current = ""
+    for para in paragraphs:
+        if len(current) + len(para) + 2 > max_chunk_chars and current:
+            chunks.append(current)
+            # Overlap: keep the tail of the previous chunk
+            if len(current) > overlap:
+                current = current[-overlap:] + "\n\n" + para
+            else:
+                current = para
+        else:
+            current = (current + "\n\n" + para).strip() if current else para
+
+    if current:
+        chunks.append(current)
+
+    return chunks
+
+
+def submit_prompt(prompt, doc_file=None):
     if not prompt or not prompt.strip():
-        return "Enter a prompt.", ""
-    task_data = {"task": prompt.strip()}
+        if not doc_file:
+            return "Enter a prompt.", ""
+
+    # Build the task text: prompt + chunked document if attached
+    task_text = prompt.strip() if prompt else ""
+    doc_summary = ""
+
+    if doc_file:
+        import os
+        fname = os.path.basename(doc_file) if isinstance(doc_file, str) else "document"
+        chunks = chunk_document(doc_file)
+        if chunks:
+            n_chunks = len(chunks)
+            total_chars = sum(len(c) for c in chunks)
+            doc_context = "\n\n---\n\n".join(
+                f"[Chunk {i+1}/{n_chunks}]\n{c}" for i, c in enumerate(chunks)
+            )
+            if task_text:
+                task_text = (
+                    f"{task_text}\n\n"
+                    f"--- ATTACHED DOCUMENT: {fname} ({n_chunks} chunks, {total_chars:,} chars) ---\n\n"
+                    f"Perform full enumerative analysis of this document.\n\n{doc_context}"
+                )
+            else:
+                task_text = (
+                    f"Analyze the following document: {fname} ({n_chunks} chunks, {total_chars:,} chars)\n\n"
+                    f"Perform full enumerative analysis.\n\n{doc_context}"
+                )
+            doc_summary = f" + {fname} ({n_chunks} chunks)"
+
+    if not task_text:
+        return "Enter a prompt or attach a document.", ""
+
+    task_data = {"task": task_text}
     submitted = 0
     task_id = None
     nodes = get_all_nodes()
@@ -884,7 +958,7 @@ def submit_prompt(prompt):
         return '<div style="color:#ef4444;font-size:11px">Failed to submit to any node.</div>', ""
     _registry["current_task"] = task_id
     total = len(nodes)
-    msg = f'<div style="color:#10b981;font-size:11px">Submitted to {submitted}/{total} nodes. Auto-refreshing.</div>'
+    msg = f'<div style="color:#10b981;font-size:11px">Submitted to {submitted}/{total} nodes{doc_summary}. Auto-refreshing.</div>'
     conv = build_conversation_stream(task_id) if task_id else ""
     return msg, conv
 
@@ -1480,6 +1554,10 @@ with gr.Blocks(css=css, theme=gr.themes.Base(primary_hue="blue", neutral_hue="sl
                 label="", show_label=False, scale=5, lines=1,
                 container=False
             )
+            doc_upload = gr.File(
+                label="", file_types=[".txt", ".md", ".py", ".json", ".csv", ".html", ".log", ".yaml", ".yml", ".toml", ".cfg", ".xml", ".rst", ".tex"],
+                scale=0, min_width=40, visible=True, container=False,
+            )
             submit_btn = gr.Button("Send", variant="primary", scale=0, min_width=60)
             new_conv_btn = gr.Button("New", variant="secondary", scale=0, min_width=50, size="sm")
         status_msg = gr.HTML()
@@ -1489,8 +1567,8 @@ with gr.Blocks(css=css, theme=gr.themes.Base(primary_hue="blue", neutral_hue="sl
         conv_timer.tick(fn=refresh_conversation_only, outputs=[conversation_html])
 
         refresh_btn = gr.Button("Refresh", size="sm", scale=0, visible=False)
-        submit_btn.click(fn=submit_prompt, inputs=[prompt_box], outputs=[status_msg, conversation_html])
-        prompt_box.submit(fn=submit_prompt, inputs=[prompt_box], outputs=[status_msg, conversation_html])
+        submit_btn.click(fn=submit_prompt, inputs=[prompt_box, doc_upload], outputs=[status_msg, conversation_html])
+        prompt_box.submit(fn=submit_prompt, inputs=[prompt_box, doc_upload], outputs=[status_msg, conversation_html])
         new_conv_btn.click(fn=new_conversation, outputs=[status_msg, conversation_html, prompt_box])
         demo.load(fn=refresh_dashboard, outputs=[dashboard_html, conversation_html])
 
