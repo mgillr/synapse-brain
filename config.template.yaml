@@ -1,35 +1,58 @@
 # Synapse Brain Swarm Configuration
-# Copy this file to config.yaml and fill in your values.
-# At minimum you need: hf_token + at least one LLM provider key.
+# Copy to config.yaml and fill in your values.
+# Minimum: hf_token + at least one LLM provider key.
 
-# HuggingFace token (required for deployment and model access)
-hf_token: "<your-hf-token>"
+# HuggingFace token (required -- free account works)
+# Get one at: https://huggingface.co/settings/tokens
+hf_token: ""
 
-# Deployment target (your HF org or username)
-hf_org: "<your-hf-org>"
+# Your HF username or org (Spaces deploy here)
+# Leave empty to auto-detect from your token.
+hf_owner: ""
 
-# LLM Provider API Keys (at least one required)
-# The swarm tries providers in order and falls back automatically.
-# Get free keys:
-#   Z.ai:        https://open.bigmodel.cn/ (GLM-4 models, generous free tier)
-#   Groq:        https://console.groq.com/ (Llama 3.3 70B, 30 req/min free)
-#   Cerebras:    https://cloud.cerebras.ai/ (Llama 3.3 70B, 30 req/min free)
-#   Google AI:   https://aistudio.google.com/ (Gemini Flash, 15 req/min free)
-#   OpenRouter:  https://openrouter.ai/ (various free models)
+# Spore naming prefix (default: synapse-spore)
+prefix: "synapse-spore"
 
-providers:
-  zai_api_key: ""        # Recommended: fast, generous limits
-  groq_api_key: ""       # Recommended: very fast inference
-  cerebras_api_key: ""   # Fast inference
-  google_ai_key: ""      # Gemini Flash free tier
-  openrouter_api_key: "" # Various free models
+# Number of spores (3 for personal use, 7 for full diversity)
+count: 3
 
-# Spore count (default: 3 for personal use, 7 for full swarm)
-spore_count: 3
+# Private Spaces (true = only you can access)
+private: true
 
-# Model assignments (optional - defaults to diverse mix)
-# Each spore gets a primary model. Leave empty for auto-assignment.
+# LLM Provider API Keys
+# The swarm tries all configured providers and falls back automatically.
+# At least one key is required. More keys = more resilient.
+#
+# Free signup links:
+#   Z.ai:       https://open.bigmodel.cn/  (GLM-4 models, generous free tier)
+#   Groq:       https://console.groq.com/  (Llama 3.3 70B, 30 req/min)
+#   Cerebras:   https://cloud.cerebras.ai/ (Llama 3.3 70B, 30 req/min)
+#   Google AI:  https://aistudio.google.com/ (Gemini Flash, 15 req/min)
+#   OpenRouter: https://openrouter.ai/     (various free models)
+api_keys:
+  zai: ""            # Recommended first choice
+  groq: ""           # Recommended second choice
+  cerebras: ""
+  google_ai: ""
+  openrouter: ""
+
+# Join an existing swarm (optional)
+# Add peer spore URLs to connect to a running swarm.
+# Your spores will gossip with these peers, sharing memories and tasks.
+# peers:
+#   - "https://orgname-synapse-spore-000.hf.space"
+#   - "https://orgname-synapse-spore-001.hf.space"
+
+# Model assignments (optional -- defaults to diverse mix)
 # models:
 #   - "Qwen/Qwen3-235B-A22B"
 #   - "meta-llama/Llama-3.3-70B-Instruct"
 #   - "deepseek-ai/DeepSeek-R1-Distill-Qwen-32B"
+
+# Advanced: enable Sentinel (autonomous code deployment)
+# Requires GITHUB_TOKEN as HF Space secret
+sentinel: false
+
+# Advanced: enable Cortex (local micro-LLM on Sentinel)
+# Requires ~3GB disk for Qwen3-4B model
+cortex: false

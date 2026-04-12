@@ -30,6 +30,20 @@ We want to find the limits. How large can a swarm grow before memory becomes
 a bottleneck? How many concurrent agents can share context effectively? What
 happens to convergence quality at 100 nodes? 1,000? 10,000?
 
+
+## Join an Existing Swarm
+
+Already have friends running Synapse Brain? Connect your spores to theirs:
+
+```yaml
+# config.yaml
+peers:
+  - "https://their-org-synapse-spore-000.hf.space"
+  - "https://their-org-synapse-spore-001.hf.space"
+```
+
+Your spores will automatically gossip with theirs -- sharing memories, tasks, and trust scores. Every node makes every other node smarter.
+
 ## Architecture
 
 ```
