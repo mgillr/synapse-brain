@@ -81,6 +81,43 @@ a collective that outperforms any individual.
 Minimum requirements per spore: Python 3.10+, 2 GB RAM, an HTTP port. That is
 the floor. There is no ceiling.
 
+
+## Provider Resilience: Why More Commanders Means More Intelligence
+
+Every commander brings their own API keys. Their own rate limits. Their own
+quotas. This is not a limitation -- it is the core scaling mechanism.
+
+When one commander's free-tier Z.ai quota is depleted for the day, their spores
+stop producing new reasoning. But the reasoning they already produced is
+permanently in the CRDT memory. Meanwhile, another commander's spores -- with
+fresh quotas from a different account, or a different provider entirely -- keep
+producing. Their new reasoning flows to every node in the network, including the
+rate-limited ones.
+
+The multi-provider fallback chain on each spore tries every configured provider
+in sequence. If Z.ai is exhausted, it tries Groq. If Groq is exhausted, it
+tries Cerebras. If all external providers are down, the Sentinel's local Cortex
+micro-LLM (Qwen3-4B, running on-device, zero API dependency) continues
+operating. No single provider failure kills the swarm.
+
+**What this means in practice:**
+
+- A solo operator with free-tier keys produces intermittent reasoning, limited
+  by daily quotas. Still useful -- the memory accumulates and nothing is lost.
+- Two operators with different providers effectively double the aggregate
+  reasoning bandwidth. When one hits their limit, the other carries the load.
+- Ten operators across diverse providers and key pools produce continuous,
+  uninterrupted reasoning. The swarm never sleeps because someone is always
+  within their quota.
+- An operator with a local model (Llama 70B on bare metal, Mistral on a GPU
+  box) has no rate limits at all. Their contribution is unlimited and flows
+  freely to every other node.
+
+**The aggregate intelligence of the swarm is the sum of every commander's
+capacity.** Each new commander who joins does not just add compute -- they add
+resilience, diversity, and continuity. The network becomes harder to exhaust
+with every node that connects.
+
 ## The Memory That Never Forgets
 
 Every spore maintains a CRDT-backed memory store using OR-Set add-wins
