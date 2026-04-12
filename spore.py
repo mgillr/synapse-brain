@@ -3151,11 +3151,12 @@ async def api_convergence():
                 latest.append({"content": content})
         agreement = convergence.measure(latest) if len(latest) >= 2 else 0.0
         velocity = convergence.velocity(task.agreement_history)
-        cycle = task.cycle
+        cycle = task.my_cycles
         phase = get_phase_adaptive(cycle, task.agreement_history, convergence)
+        desc = task.description or ""
         task_convergence.append({
             "task_id": tid,
-            "question": (task.question[:120] + "...") if len(task.question) > 120 else task.question,
+            "description": (desc[:120] + "...") if len(desc) > 120 else desc,
             "cycle": cycle,
             "phase": phase,
             "agreement": round(agreement, 4),
@@ -3215,4 +3216,4 @@ if MY_ROLE == "sentinel":
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run(app, host="0.0.0.0", port=PORT)
-# v5.4 -- convergence endpoint + MCP discovery
+# v5.4.1 -- convergence endpoint fix
