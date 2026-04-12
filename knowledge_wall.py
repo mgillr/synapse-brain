@@ -406,14 +406,38 @@ class DualMemory:
         """Build gossip payload from collective layer ONLY.
 
         This is what goes over the wire. Private memory never appears here.
+        No record cap -- delta gossip handles bandwidth at the transport layer.
         """
         return {
-            "collective_records": dict(
-                list(self._collective_records.items())[-50:]
-            ),
+            "collective_records": dict(self._collective_records),
             "collective_keys": list(self._collective_keys),
             "wall_stats": self.wall.stats(),
         }
+
+    def recall_collective(self, query, top_k=5):
+        """Semantic search over collective knowledge.
+
+        Public API for MCP and external callers -- no underscore access needed.
+        """
+        if not self._collective_records:
+            return []
+        contents = [r.get("content", "") for r in self._collective_records.values()]
+        keys = list(self._collective_records.keys())
+        if len(contents) < 2:
+            return list(self._collective_records.values())[:top_k]
+
+        from sklearn.feature_extraction.text import TfidfVectorizer
+        from sklearn.metrics.pairwise import cosine_similarity
+        tfidf = TfidfVectorizer(max_features=5000, stop_words="english")
+        tfidf.fit(contents)
+        query_vec = tfidf.transform([query])
+        corpus_vecs = tfidf.transform(contents)
+        sims = cosine_similarity(query_vec, corpus_vecs)[0]
+        top_idx = sims.argsort()[-top_k:][::-1]
+        return [
+            {**self._collective_records[keys[i]], "similarity": float(sims[i])}
+            for i in top_idx if sims[i] > 0.05
+        ]
 
     def merge_collective(self, incoming: dict) -> int:
         """Merge collective knowledge from a peer."""

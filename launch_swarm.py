@@ -232,12 +232,22 @@ def generate_spore_app(
     app_py = template_path.read_text()
 
     # Substitute all 4 placeholders
-    app_py = (
+    # Template substitution: single-pass via string.Template
+    # Prevents future comments/docstrings containing placeholder strings
+    # from silently corrupting deployments.
+    from string import Template as _Tmpl
+    _tmpl_src = (
         app_py
-        .replace("__SPORE_ID__", spore_id)
-        .replace("__PEERS_JSON__", peers_json.replace("'", "\\'"))
-        .replace("__SPORE_INDEX__", str(spore_index))
-        .replace("__PRIMARY_MODEL__", primary_model)
+        .replace("__SPORE_ID__", "${_SPORE_ID}")
+        .replace("__PEERS_JSON__", "${_PEERS_JSON}")
+        .replace("__SPORE_INDEX__", "${_SPORE_INDEX}")
+        .replace("__PRIMARY_MODEL__", "${_PRIMARY_MODEL}")
+    )
+    app_py = _Tmpl(_tmpl_src).safe_substitute(
+        _SPORE_ID=spore_id,
+        _PEERS_JSON=peers_json.replace("'", "\\'"),
+        _SPORE_INDEX=str(spore_index),
+        _PRIMARY_MODEL=primary_model,
     )
 
     is_sentinel = ROLE_NAMES[spore_index] == "Sentinel"
@@ -247,7 +257,6 @@ def generate_spore_app(
         "crdt-merge>=0.9.5\n"
         "httpx>=0.27\n"
         "numpy>=1.24\n"
-        "sentence-transformers>=3.0\n"
         "fastapi>=0.115\n"
         "uvicorn>=0.30\n"
     )

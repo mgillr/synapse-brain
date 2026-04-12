@@ -273,13 +273,45 @@ class FederationRegistry:
 
         return filtered
 
-    def record_contribution(self, node_id: str):
-        """Record a positive contribution from a node."""
+    def record_contribution(self, node_id: str, contribution_quality=None):
+        """Record a contribution with quality-weighted trust increment.
+
+        Trust increment scales with contribution quality:
+        - High quality (>0.6): +0.02
+        - Normal quality (0.3-0.6): +0.01
+        - Low quality (<0.3): +0.001
+
+        Rate limited: max 5 trust increments per hour per node.
+        Prevents Sybil nodes from accumulating trust faster than
+        legitimate contributors.
+        """
         node = self.nodes.get(node_id)
-        if node:
-            node.contributions += 1
-            # Trust increases with consistent contributions
-            node.update_trust(0.01)
+        if not node:
+            return
+
+        # Quality-weighted increment
+        if contribution_quality is None:
+            increment = 0.01
+        elif contribution_quality > 0.6:
+            increment = 0.02
+        elif contribution_quality > 0.3:
+            increment = 0.01
+        else:
+            increment = 0.001
+
+        # Rate limiting: max 5 trust increments per hour per node
+        now = time.time()
+        if not hasattr(self, "_contribution_timestamps"):
+            self._contribution_timestamps = {}
+        if node_id not in self._contribution_timestamps:
+            self._contribution_timestamps[node_id] = []
+        recent = [t for t in self._contribution_timestamps[node_id] if now - t < 3600]
+        if len(recent) >= 5:
+            return  # rate limited
+        self._contribution_timestamps[node_id] = recent + [now]
+
+        node.contributions += 1
+        node.update_trust(increment)
 
     def record_violation(self, node_id: str, severity: float = 0.1):
         """Record a protocol violation from a node."""

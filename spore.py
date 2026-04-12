@@ -22,8 +22,11 @@ import json
 import logging
 import os
 import re
+import atexit
+import signal
 import threading
 import time
+import random
 from collections import defaultdict
 
 # Repo/deployment config -- override via environment for your own deployment
@@ -270,18 +273,153 @@ CONVERGENCE: {convergence}%
 {phase_instruction}"""
 
 
+
+
+# ---------------------------------------------------------------------------
+# Bloom Filter Sketch (anti-entropy gossip optimization)
+# ---------------------------------------------------------------------------
+class BloomSketch:
+    """Compact probabilistic set membership for gossip anti-entropy.
+
+    At 100k keys with 1% false positive rate: ~120KB.
+    Exchange sketches to identify missing memories without sending full key lists.
+    """
+
+    def __init__(self, expected_items=100000, fp_rate=0.01):
+        import math
+        self.size = max(64, int(-expected_items * math.log(fp_rate) / (math.log(2) ** 2)))
+        self.num_hashes = max(1, int((self.size / max(1, expected_items)) * math.log(2)))
+        self.bits = bytearray(self.size // 8 + 1)
+
+    def _hashes(self, key):
+        h1 = hash(key) & 0xFFFFFFFF
+        h2 = hash(key + "_bloom") & 0xFFFFFFFF
+        for i in range(self.num_hashes):
+            yield (h1 + i * h2) % self.size
+
+    def add(self, key):
+        for pos in self._hashes(key):
+            self.bits[pos // 8] |= (1 << (pos % 8))
+
+    def __contains__(self, key):
+        return all(
+            self.bits[pos // 8] & (1 << (pos % 8))
+            for pos in self._hashes(key)
+        )
+
+    def to_bytes(self):
+        return bytes(self.bits)
+
+    @classmethod
+    def from_bytes(cls, data, expected_items=100000, fp_rate=0.01):
+        sketch = cls(expected_items, fp_rate)
+        sketch.bits = bytearray(data)
+        return sketch
+
+
+# ---------------------------------------------------------------------------
+# MinHash/LSH Index (O(1) approximate nearest-neighbor recall at scale)
+# ---------------------------------------------------------------------------
+class MinHashIndex:
+    """Locality-Sensitive Hashing for approximate nearest-neighbor recall.
+
+    At 50k+ memories, TF-IDF cosine becomes too expensive (O(n*d)).
+    MinHash provides O(1) retrieval with bounded error.
+    Used as a scale complement: TF-IDF below threshold, MinHash above.
+    """
+
+    NUM_HASHES = 128
+    NUM_BANDS = 16
+    ROWS_PER_BAND = 8  # NUM_HASHES / NUM_BANDS
+
+    def __init__(self):
+        self._signatures = {}
+        self._buckets = [{} for _ in range(self.NUM_BANDS)]
+        self._records = {}
+        self._a = [random.randint(1, 2**31 - 1) for _ in range(self.NUM_HASHES)]
+        self._b = [random.randint(0, 2**31 - 1) for _ in range(self.NUM_HASHES)]
+        self._p = 2**31 - 1
+
+    def _shingle(self, text, k=3):
+        text = text.lower().strip()
+        if len(text) < k:
+            return {text}
+        return {text[i:i + k] for i in range(len(text) - k + 1)}
+
+    def _minhash(self, shingles):
+        sig = [float("inf")] * self.NUM_HASHES
+        for shingle in shingles:
+            h = hash(shingle) & 0xFFFFFFFF
+            for i in range(self.NUM_HASHES):
+                val = (self._a[i] * h + self._b[i]) % self._p
+                if val < sig[i]:
+                    sig[i] = val
+        return tuple(sig)
+
+    def _band_hash(self, signature, band_idx):
+        start = band_idx * self.ROWS_PER_BAND
+        end = start + self.ROWS_PER_BAND
+        return hash(signature[start:end])
+
+    def insert(self, key, content, record):
+        shingles = self._shingle(content)
+        if not shingles:
+            return
+        sig = self._minhash(shingles)
+        self._signatures[key] = sig
+        self._records[key] = record
+        for band_idx in range(self.NUM_BANDS):
+            bh = self._band_hash(sig, band_idx)
+            if bh not in self._buckets[band_idx]:
+                self._buckets[band_idx][bh] = set()
+            self._buckets[band_idx][bh].add(key)
+
+    def query(self, text, top_k=5):
+        shingles = self._shingle(text)
+        if not shingles:
+            return []
+        query_sig = self._minhash(shingles)
+        candidates = set()
+        for band_idx in range(self.NUM_BANDS):
+            bh = self._band_hash(query_sig, band_idx)
+            if bh in self._buckets[band_idx]:
+                candidates.update(self._buckets[band_idx][bh])
+        if not candidates:
+            return []
+        results = []
+        for key in candidates:
+            if key in self._signatures:
+                sig = self._signatures[key]
+                matches = sum(1 for a, b in zip(query_sig, sig) if a == b)
+                jaccard = matches / self.NUM_HASHES
+                if jaccard > 0.05:
+                    rec = self._records.get(key, {})
+                    results.append({"key": key, "similarity": jaccard, **rec})
+        results.sort(key=lambda x: x["similarity"], reverse=True)
+        return results[:top_k]
+
+    @property
+    def size(self):
+        return len(self._signatures)
+
 # ---------------------------------------------------------------------------
 # CRDT Memory System
 # ---------------------------------------------------------------------------
 class CRDTMemory:
-    """Persistent agent memory backed by crdt-merge.
+    """Persistent agent memory backed by crdt-merge with WAL durability.
 
     ORSet tracks memory keys -- add-wins means nothing is ever lost.
     MerkleTree stores content indexed by key -- integrity-verified.
     VectorClock orders events causally across the swarm.
+    WAL (Write-Ahead Log) ensures durability across process restarts.
+    MinHash/LSH provides O(1) retrieval at scale (50k+ memories).
+    Semantic dedup prevents redundant memories from consuming resources.
 
-    The memory sidecar continuously re-indexes for fast semantic recall.
+    The memory IS the infrastructure -- not a service the agent consumes.
     """
+
+    DEDUP_THRESHOLD = 0.92  # cosine similarity threshold for near-duplicates
+    MINHASH_THRESHOLD = 50000  # switch to MinHash above this corpus size
 
     def __init__(self, spore_id):
         self.spore_id = spore_id
@@ -293,12 +431,119 @@ class CRDTMemory:
         self._corpus_keys = []
         self._lock = threading.Lock()
         self._needs_refit = False
+        self._minhash_index = MinHashIndex()
+
+        # Sequence tracking for delta-based gossip (Phase C)
+        self._sequence = 0
+        self._key_sequence = {}  # key -> sequence number
+
+        # WAL persistence: /data/ on HF paid tier, /tmp/ on free tier
+        self._wal_dir = "/data/synapse" if os.path.isdir("/data") else "/tmp/synapse-wal"
+        os.makedirs(self._wal_dir, exist_ok=True)
+        self._wal_path = os.path.join(self._wal_dir, f"memory_{spore_id}.wal")
+        self._wal_file = None
+        self._replay_wal()
+
+    # --- WAL persistence ---
+
+    def _wal_append(self, key, content, metadata):
+        """Append-only WAL write. Buffered; flushed on shutdown."""
+        try:
+            if self._wal_file is None:
+                self._wal_file = open(self._wal_path, "a", buffering=8192)
+            entry = json.dumps({"k": key, "c": content, "m": metadata or {}})
+            self._wal_file.write(entry + "\n")
+        except OSError as e:
+            log.warning("WAL write failed: %s", e)
+
+    def flush_wal(self):
+        """Flush WAL to disk. Called on shutdown and periodically."""
+        if self._wal_file:
+            try:
+                self._wal_file.flush()
+                os.fsync(self._wal_file.fileno())
+            except OSError:
+                pass
+
+    def _replay_wal(self):
+        """Reconstruct memory from WAL on startup."""
+        if not os.path.exists(self._wal_path):
+            return
+        count = 0
+        with open(self._wal_path) as f:
+            for line in f:
+                try:
+                    e = json.loads(line.strip())
+                    self._restore_from_wal(e["k"], e["c"], e.get("m", {}))
+                    count += 1
+                except (json.JSONDecodeError, KeyError):
+                    continue  # corrupt trailing entry from crash -- skip
+        if count > 0:
+            log.info("WAL replay: restored %d memories from %s", count, self._wal_path)
+
+    def _restore_from_wal(self, key, content, metadata):
+        """Restore a single memory from WAL without writing back to WAL."""
+        ts = metadata.get("timestamp", time.time())
+        self.orset.add(key)
+        record = {
+            "content": content, "spore": self.spore_id,
+            "timestamp": ts, "clock": self.clock.to_dict(),
+            **(metadata or {}),
+        }
+        self.index.insert(key, record)
+        self._corpus.append(content)
+        self._corpus_keys.append(key)
+        self._minhash_index.insert(key, content, record)
+        self._sequence += 1
+        self._key_sequence[key] = self._sequence
+        self._needs_refit = True
+
+    # --- Semantic dedup ---
+
+    def _is_near_duplicate(self, content):
+        """Check if content is near-duplicate of existing memory.
+
+        Returns the key of the duplicate if found, None otherwise.
+        """
+        if len(self._corpus) < 10 or self._needs_refit:
+            return None
+        try:
+            query_vec = self._tfidf.transform([content])
+            corpus_vecs = self._tfidf.transform(self._corpus)
+            sims = cosine_similarity(query_vec, corpus_vecs)[0]
+            max_sim = float(sims.max())
+            if max_sim > self.DEDUP_THRESHOLD:
+                dup_idx = int(sims.argmax())
+                dup_key = self._corpus_keys[dup_idx]
+                existing = self.index.get_record(dup_key)
+                if existing:
+                    existing["citations"] = existing.get("citations", 0) + 1
+                    existing["last_cited"] = time.time()
+                return dup_key
+        except Exception:
+            pass
+        return None
+
+    # --- Core remember/recall ---
 
     def remember(self, content, metadata=None):
-        """Store a memory. Returns the key. Nothing is ever lost."""
+        """Store a memory. WAL-first, dedup-checked. Nothing distinct is ever lost."""
+        # Guard: reject empty/trivially short content
+        if not content or len(content.strip()) < 15:
+            return None
+
         ts = time.time()
         raw = f"{content}|{ts}|{self.spore_id}"
         key = hashlib.sha256(raw.encode()).hexdigest()[:16]
+
+        # Semantic dedup check (before WAL to avoid persisting duplicates)
+        with self._lock:
+            dup_key = self._is_near_duplicate(content)
+        if dup_key:
+            return dup_key
+
+        # WAL-first: persist before in-memory state update
+        self._wal_append(key, content, {**(metadata or {}), "timestamp": ts})
 
         with self._lock:
             self.clock = self.clock.increment(self.spore_id)
@@ -313,15 +558,33 @@ class CRDTMemory:
             self.index.insert(key, record)
             self._corpus.append(content)
             self._corpus_keys.append(key)
+            self._minhash_index.insert(key, content, record)
+            self._sequence += 1
+            self._key_sequence[key] = self._sequence
             self._needs_refit = True
 
         return key
 
-    def recall(self, query, top_k=5):
-        """Retrieve the most relevant memories for a query."""
+    def recall(self, query, top_k=5, trust_store=None):
+        """Retrieve the most relevant memories, weighted by source trust.
+
+        Hybrid retrieval: TF-IDF below 50k memories, MinHash above.
+        Trust weighting: 70% relevance + 30% source trust score.
+        """
         with self._lock:
+            # Scale mode: MinHash O(1) retrieval
+            if len(self._corpus) > self.MINHASH_THRESHOLD:
+                results = self._minhash_index.query(query, top_k * 2)
+                if trust_store:
+                    for r in results:
+                        src = r.get("spore", "")
+                        src_trust = trust_store.get(src) if src else 0.5
+                        r["similarity"] = 0.7 * r["similarity"] + 0.3 * src_trust
+                results.sort(key=lambda x: x["similarity"], reverse=True)
+                return results[:top_k]
+
+            # Standard mode: TF-IDF
             if len(self._corpus) < 2:
-                # Return everything if too few memories for TF-IDF
                 results = []
                 for k in self._corpus_keys:
                     rec = self.index.get_record(k)
@@ -338,6 +601,16 @@ class CRDTMemory:
                 query_vec = self._tfidf.transform([query])
                 sims = cosine_similarity(query_vec, corpus_vecs)[0]
 
+                # Trust-weighted scoring
+                if trust_store:
+                    for idx in range(len(sims)):
+                        key = self._corpus_keys[idx]
+                        rec = self.index.get_record(key)
+                        if rec:
+                            src = rec.get("spore", "")
+                            src_trust = trust_store.get(src) if src else 0.5
+                            sims[idx] = 0.7 * sims[idx] + 0.3 * src_trust
+
                 top_idx = sims.argsort()[-top_k:][::-1]
                 results = []
                 for idx in top_idx:
@@ -353,24 +626,43 @@ class CRDTMemory:
                 log.warning("Memory recall failed: %s", e)
                 return []
 
+    async def recall_async(self, query, top_k=5, trust_store=None):
+        """Non-blocking recall that offloads TF-IDF to thread pool."""
+        loop = asyncio.get_event_loop()
+        return await loop.run_in_executor(
+            None, lambda: self.recall(query, top_k, trust_store)
+        )
+
     def merge_incoming(self, orset_dict, records):
-        """Merge memory from a peer. Add-wins: new memories always survive."""
+        """Merge memory from a peer. Add-wins: new memories always survive.
+
+        Accepts both legacy format (orset + records) and delta format (records only).
+        WAL-persists incoming records for durability.
+        """
         with self._lock:
-            try:
-                incoming = ORSet.from_dict(orset_dict)
-                self.orset = self.orset.merge(incoming)
-            except Exception as e:
-                log.warning("ORSet merge failed: %s", e)
+            # Merge ORSet if provided (legacy full-sync format)
+            if orset_dict:
+                try:
+                    incoming = ORSet.from_dict(orset_dict)
+                    self.orset = self.orset.merge(incoming)
+                except Exception as e:
+                    log.warning("ORSet merge failed: %s", e)
 
             new_count = 0
             for key, record in records.items():
                 if not self.index.contains(key):
-                    self.index.insert(key, record)
                     content = record.get("content", "")
+                    self.index.insert(key, record)
+                    self.orset.add(key)
                     self._corpus.append(content)
                     self._corpus_keys.append(key)
+                    self._minhash_index.insert(key, content, record)
+                    self._sequence += 1
+                    self._key_sequence[key] = self._sequence
                     new_count += 1
                     self._needs_refit = True
+                    # WAL-persist incoming memories for durability
+                    self._wal_append(key, content, record)
 
             return new_count
 
@@ -383,20 +675,31 @@ class CRDTMemory:
             except Exception:
                 pass
 
-    def sync_payload(self, known_keys=None):
-        """Build a gossip payload with new memories for peers."""
+    def sync_payload(self, since_sequence=0):
+        """Build gossip delta since a given sequence number.
+
+        Args:
+            since_sequence: only send records newer than this.
+                           0 = full sync (for new peers joining).
+        """
         with self._lock:
-            all_keys = list(self.orset.value) if self.orset.value else []
-            if known_keys:
-                new_keys = [k for k in all_keys if k not in known_keys]
+            if since_sequence == 0:
+                # Full sync for new peer: send latest 200 records
+                new_keys = sorted(
+                    self._key_sequence.keys(),
+                    key=lambda k: self._key_sequence.get(k, 0)
+                )[-200:]
             else:
-                new_keys = all_keys
+                # Delta: only records since peer's last known sequence
+                new_keys = [
+                    k for k, seq in self._key_sequence.items()
+                    if seq > since_sequence
+                ]
 
             records = {}
-            for key in new_keys[-50:]:  # Cap per gossip to avoid huge payloads
+            for key in new_keys:
                 rec = self.index.get_record(key)
                 if rec:
-                    # Serialize cleanly -- strip non-JSON-safe fields
                     clean = {}
                     for k, v in rec.items():
                         try:
@@ -407,10 +710,10 @@ class CRDTMemory:
                     records[key] = clean
 
             return {
-                "orset": self.orset.to_dict(),
                 "records": records,
                 "clock": self.clock.to_dict(),
-                "total_memories": len(all_keys),
+                "sequence": self._sequence,
+                "total_memories": len(self._key_sequence),
             }
 
     @property
@@ -533,8 +836,20 @@ class SemanticConvergence:
         self._tfidf = TfidfVectorizer(max_features=2000, stop_words="english")
 
     def measure(self, contributions):
-        """Average pairwise cosine similarity across contributions. 0.0 to 1.0."""
-        texts = [c.get("content", "") or c.get("hypothesis", "") for c in contributions]
+        """Average pairwise cosine similarity across HYPOTHESES (not full text).
+
+        Measures position agreement, not vocabulary overlap. Two spores
+        reaching the same conclusion via different reasoning score high.
+        """
+        texts = []
+        for c in contributions:
+            hyp = c.get("hypothesis", "")
+            if hyp and len(hyp.strip()) > 10:
+                texts.append(hyp)
+            else:
+                content = c.get("content", "")
+                if content and len(content.strip()) > 10:
+                    texts.append(content)
         texts = [t for t in texts if t.strip()]
         if len(texts) < 2:
             return 0.0
@@ -884,12 +1199,19 @@ def get_phase_adaptive(cycle, agreement_history, convergence_obj):
     - Diverge -> Deepen: after minimum 3 cycles OR agreement drops (ideas flowing)
     - Deepen -> Converge: agreement velocity positive for 2+ cycles
     - Converge -> Synthesize: agreement > 50% OR stable for 3 cycles OR cycle > 20
+    - REGRESSION: if agreement drops >15% in 3 cycles, reopen exploration
     """
     if cycle <= 2:
         return "diverge"
 
     vel = convergence_obj.velocity(agreement_history)
     current_agreement = agreement_history[-1] if agreement_history else 0.0
+
+    # REGRESSION: adversarial challenges trigger genuine re-examination
+    if len(agreement_history) >= 3 and cycle < 18:
+        recent_drop = agreement_history[-1] - agreement_history[-3]
+        if recent_drop < -0.15:
+            return "diverge"
 
     # High agreement already? Move to synthesis
     if current_agreement > 0.6 and cycle >= 5:
@@ -982,6 +1304,37 @@ memory.remember(
     f"I have the full Master Cognitive Protocol. My role is a lens, not a limitation.",
     metadata={"type": "identity", "role": MY_ROLE},
 )
+
+
+# ---------------------------------------------------------------------------
+# Canonical memory entry point (replaces monkey-patch)
+# ---------------------------------------------------------------------------
+def store_memory(content, metadata=None):
+    """Canonical memory entry point. Routes through wall if active.
+
+    All code should call store_memory() instead of memory.remember() directly.
+    This ensures Knowledge Wall distillation happens exactly once per entry.
+    """
+    if dual_memory:
+        return dual_memory.remember(content, metadata)
+    return memory.remember(content, metadata)
+
+
+# ---------------------------------------------------------------------------
+# Graceful shutdown handler (WAL flush)
+# ---------------------------------------------------------------------------
+def _shutdown_handler(signum=None, frame=None):
+    """Flush WAL and state on graceful shutdown."""
+    log.info("Shutdown signal received -- flushing state")
+    try:
+        memory.flush_wal()
+    except Exception as e:
+        log.warning("Shutdown flush error: %s", e)
+    log.info("State flushed -- exiting cleanly")
+
+signal.signal(signal.SIGTERM, _shutdown_handler)
+signal.signal(signal.SIGINT, _shutdown_handler)
+atexit.register(_shutdown_handler)
 
 
 # ---------------------------------------------------------------------------
@@ -1078,6 +1431,14 @@ RULES:
     return prompt
 
 
+def _synthesis_stale(task, timeout=120):
+    """True if synthesis was expected but has not happened within timeout."""
+    if not hasattr(task, "_synthesis_expected_at"):
+        task._synthesis_expected_at = time.time()
+        return False
+    return time.time() - task._synthesis_expected_at > timeout
+
+
 async def reason_on_task(task):
     """Run one reasoning cycle on a task. Returns the delta produced."""
     task.my_cycles += 1
@@ -1129,17 +1490,21 @@ async def reason_on_task(task):
     spore_state.deltas_produced += 1
     spore_state.reasoning_cycles += 1
 
-    # Store reasoning in persistent memory
-    memory.remember(
-        f"[Task {task.task_id[:8]}] {parsed.get('hypothesis', '')}",
-        metadata={
-            "type": "reasoning",
-            "task_id": task.task_id,
-            "cycle": cycle,
-            "claims": parsed.get("claims", []),
-            "confidence": parsed.get("confidence", 0.5),
-        },
-    )
+    # Store reasoning in persistent memory -- guard against empty/short responses
+    _hyp = parsed.get("hypothesis", "")
+    if _hyp and len(_hyp.strip()) > 20:
+        store_memory(
+            f"[Task {task.task_id[:8]}] {_hyp}",
+            metadata={
+                "type": "reasoning",
+                "task_id": task.task_id,
+                "cycle": cycle,
+                "claims": parsed.get("claims", []),
+                "confidence": parsed.get("confidence", 0.5),
+            },
+        )
+    else:
+        log.debug("Skipping empty/short LLM response for memory storage")
 
     # Update trust based on peer engagement
     for pid, peer_delta in task.peer_latest(SPORE_ID).items():
@@ -1184,13 +1549,19 @@ async def reason_on_task(task):
         or cycle >= 20
     )
 
-    if should_synthesize and not task.converged and MY_ROLE == "synthesizer":
+    # Synthesis failover: synthesizer is primary, brain-tier is backup
+    _can_synthesize = (
+        MY_ROLE == "synthesizer"
+        or (MY_ROLE in ("brain", "validator")
+            and _synthesis_stale(task, timeout=120))
+    )
+    if should_synthesize and not task.converged and _can_synthesize:
         log.info("Synthesis triggered at cycle %d, agreement %.0f%%", cycle, agreement * 100)
         synthesis = await synthesize_task(task)
         if synthesis:
             task.converged = True
             task.final_answer = synthesis
-            memory.remember(
+            store_memory(
                 f"[SYNTHESIS task {task.task_id[:8]}] {synthesis}",
                 metadata={"type": "synthesis", "task_id": task.task_id},
             )
@@ -1244,11 +1615,16 @@ Do NOT mention the swarm, spores, trust, or reasoning process. Just deliver the 
 # Gossip protocol (memory-synced, trust-weighted)
 # ---------------------------------------------------------------------------
 async def gossip_push():
-    """Push reasoning deltas + CRDT memory + trust state to all peers.
+    """Push reasoning deltas + CRDT memory delta + trust state to all peers.
 
-    Trust-weighted: high-trust peers get our full memory delta.
-    Low-trust peers get only recent reasoning deltas.
+    Delta-based: tracks per-peer sequence cursors so only new memories are sent.
+    Single-operator mode: all spores share everything (no trust gating on memories).
+    Federation mode: trust gates apply at cross-cluster boundary only.
     """
+    # Track per-peer sequence cursors for delta gossip
+    if not hasattr(spore_state, "peer_sequences"):
+        spore_state.peer_sequences = {}
+
     recent_deltas = []
     task_meta = {}
     for tid, task in spore_state.tasks.items():
@@ -1261,43 +1637,51 @@ async def gossip_push():
             "final_answer": task.final_answer,
         }
 
-    mem_sync = memory.sync_payload()
-
     # Build collective knowledge payload if wall is active
     collective_payload = {}
     if dual_memory:
         collective_payload = dual_memory.collective_payload()
 
-    payload = {
-        "from": SPORE_ID,
-        "role": MY_ROLE,
-        "model": PRIMARY_MODEL,
-        "deltas": recent_deltas,
-        "tasks": task_meta,
-        "peer_list": list(spore_state.peers_seen),
-        "memory": mem_sync,
-        "trust": trust.to_dict(),
-        "collective": collective_payload,
-    }
-
     async with httpx.AsyncClient(timeout=12.0, headers=HF_AUTH) as client:
         for peer_url in PEERS:
             try:
-                peer_id_guess = peer_url.split("/")[-1].replace("synapse-spore-", "spore-")
-                peer_trust = trust.get(peer_id_guess)
+                peer_key = peer_url.split("/")[-1]
+                last_seq = spore_state.peer_sequences.get(peer_key, 0)
+                mem_sync = memory.sync_payload(since_sequence=last_seq)
 
-                # Trust-weighted: send full payload to trusted peers
-                send_payload = payload.copy()
-                if peer_trust < 0.3:
-                    # Low trust: omit full memory sync
-                    send_payload.pop("memory", None)
-                    log.debug("Low trust for %s (%.2f) -- limited payload", peer_id_guess, peer_trust)
+                payload = {
+                    "from": SPORE_ID,
+                    "role": MY_ROLE,
+                    "model": PRIMARY_MODEL,
+                    "deltas": recent_deltas,
+                    "tasks": task_meta,
+                    "peer_list": list(spore_state.peers_seen),
+                    "memory": mem_sync,
+                    "trust": trust.to_dict(),
+                    "collective": collective_payload,
+                }
 
-                resp = await client.post(f"{peer_url}/api/gossip", json=send_payload)
+                # Federation trust gating: single-operator sends everything;
+                # multi-operator gates at cross-cluster boundary
+                is_federation = (
+                    federation is not None
+                    and hasattr(federation, "is_multi_operator")
+                    and federation.is_multi_operator
+                )
+                if is_federation:
+                    peer_id_guess = peer_key.replace("synapse-spore-", "spore-")
+                    peer_trust = trust.get(peer_id_guess)
+                    if peer_trust < 0.3:
+                        payload["memory"] = {"records": {}, "clock": {}, "sequence": 0, "total_memories": 0}
+                        log.debug("Federation low-trust: limited payload to %s (%.2f)", peer_key, peer_trust)
+
+                resp = await client.post(f"{peer_url}/api/gossip", json=payload)
                 if resp.status_code == 200:
                     data = resp.json()
+                    # Update peer's sequence cursor from our sent sequence
+                    spore_state.peer_sequences[peer_key] = mem_sync.get("sequence", 0)
                     process_gossip_response(data)
-                    log.info("Gossip -> %s OK", data.get("spore", peer_url.split("/")[-1]))
+                    log.info("Gossip -> %s OK (delta: %d records)", data.get("spore", peer_key), len(mem_sync.get("records", {})))
             except Exception as e:
                 log.debug("Gossip -> %s: %s", peer_url.split("/")[-1], str(e)[:60])
 
@@ -1385,7 +1769,9 @@ def handle_gossip_request(data):
         "deltas": our_deltas,
         "tasks": our_tasks,
         "peer_list": list(spore_state.peers_seen),
-        "memory": memory.sync_payload(),
+        "memory": memory.sync_payload(
+            since_sequence=data.get("memory", {}).get("sequence", 0)
+        ),
         "trust": trust.to_dict(),
     }
     if dual_memory:
@@ -1489,7 +1875,7 @@ async def heartbeat():
             if spore_state.reasoning_cycles > 0 and spore_state.reasoning_cycles % 5 == 0:
                 insights = learner.analyze()
                 if insights:
-                    memory.remember(
+                    store_memory(
                         f"Temporal self-analysis: {'; '.join(insights)}",
                         metadata={"type": "self_analysis"},
                     )
@@ -1803,7 +2189,7 @@ Respond ONLY with this JSON (no other text):
             parsed = json.loads(analysis_json)
         except json.JSONDecodeError:
             log.warning("Sentinel: analysis was not valid JSON, skipping")
-            memory.remember(
+            store_memory(
                 "Sentinel: analysis produced non-JSON output, skipping cycle",
                 metadata={"type": "sentinel_skip"},
             )
@@ -1815,7 +2201,7 @@ Respond ONLY with this JSON (no other text):
         # Confidence gate: must be >= 0.6 and not high risk
         if confidence < 0.6 or risk == "high":
             log.info("Sentinel: below threshold (conf=%.2f, risk=%s) -- observing only", confidence, risk)
-            memory.remember(
+            store_memory(
                 f"Sentinel observed (no proposal): {parsed.get('observation', '')}",
                 metadata={"type": "sentinel_observation", "confidence": confidence, "risk": risk},
             )
@@ -1856,7 +2242,7 @@ Respond ONLY with this JSON (no other text):
         }
         _sentinel.active_proposal = proposal_id
 
-        memory.remember(
+        store_memory(
             f"Sentinel proposal {proposal_id[:8]}: {parsed.get('hypothesis', '')}",
             metadata={"type": "sentinel_proposal", "proposal_id": proposal_id},
         )
@@ -1943,7 +2329,7 @@ Respond ONLY with this JSON (no other text):
 
             if not old_text or not new_text:
                 log.warning("Sentinel: code patch missing old_text/new_text")
-                memory.remember("Sentinel test FAIL: code patch missing old_text/new_text",
+                store_memory("Sentinel test FAIL: code patch missing old_text/new_text",
                                 metadata={"type": "sentinel_test", "result": "fail"})
                 return results
 
@@ -1970,7 +2356,7 @@ Respond ONLY with this JSON (no other text):
             if old_text not in current_content:
                 log.warning("Sentinel: old_text not found in %s -- patch would fail", target_file)
                 results["syntax"] = False
-                memory.remember(f"Sentinel test FAIL: old_text not found in {target_file}",
+                store_memory(f"Sentinel test FAIL: old_text not found in {target_file}",
                                 metadata={"type": "sentinel_test", "result": "fail"})
                 return results
 
@@ -1981,7 +2367,7 @@ Respond ONLY with this JSON (no other text):
                 results["syntax"] = True
             except SyntaxError as e:
                 log.error("Sentinel: patched %s has syntax error: %s", target_file, e)
-                memory.remember(f"Sentinel test FAIL: syntax error after patch: {e}",
+                store_memory(f"Sentinel test FAIL: syntax error after patch: {e}",
                                 metadata={"type": "sentinel_test", "result": "fail"})
                 return results
 
@@ -2003,7 +2389,7 @@ Respond ONLY with this JSON (no other text):
             proposal["_file_sha"] = file_data["sha"]
 
         all_pass = all(results.values())
-        memory.remember(
+        store_memory(
             f"Sentinel test {'PASS' if all_pass else 'FAIL'}: {results} for {change_type} change",
             metadata={"type": "sentinel_test", "result": "pass" if all_pass else "fail", "details": results},
         )
@@ -2039,7 +2425,7 @@ Respond ONLY with this JSON (no other text):
             deploy_record["status"] = "success"
             deploy_record["spaces_deployed"] = deployed_to
             _sentinel.deployment_log.append(deploy_record)
-            memory.remember(
+            store_memory(
                 f"Sentinel deployed config: {target}={value} to {len(deployed_to)} spores",
                 metadata={"type": "sentinel_deployment", "target": target, "count": len(deployed_to)},
             )
@@ -2047,7 +2433,7 @@ Respond ONLY with this JSON (no other text):
             return True
 
         elif change_type == "prompt":
-            memory.remember(
+            store_memory(
                 f"Sentinel prompt optimization: {analysis.get('hypothesis', '')} -- "
                 f"new prompt guidance: {analysis.get('proposed_value', '')}",
                 metadata={"type": "sentinel_prompt_change", "target": analysis.get("target", "")},
@@ -2110,7 +2496,7 @@ Respond ONLY with this JSON (no other text):
 
             deploy_record["github_sha"] = commit_sha
             log.info("Sentinel: committed %s to GitHub (%s)", target_file, commit_sha[:8])
-            memory.remember(
+            store_memory(
                 f"Sentinel committed {target_file} to GitHub: {commit_sha[:8]} -- {commit_msg}",
                 metadata={"type": "sentinel_commit", "sha": commit_sha, "file": target_file},
             )
@@ -2210,7 +2596,7 @@ Respond ONLY with this JSON (no other text):
                 # Revert GitHub commit
                 await _sentinel_revert_github(gh_token, target_file, original_content, new_file_sha, commit_msg)
 
-                memory.remember(
+                store_memory(
                     f"Sentinel ROLLBACK: {commit_msg} -- only {healthy_count}/{total} healthy",
                     metadata={"type": "sentinel_rollback", "sha": commit_sha},
                 )
@@ -2220,7 +2606,7 @@ Respond ONLY with this JSON (no other text):
             # ---- SUCCESS ----
             deploy_record["status"] = "success"
             _sentinel.deployment_log.append(deploy_record)
-            memory.remember(
+            store_memory(
                 f"Sentinel deployed code change: {commit_msg} -- "
                 f"{len(deploy_record['spaces_deployed'])} spaces, health {healthy_count}/{total}",
                 metadata={"type": "sentinel_deployment", "sha": commit_sha,
@@ -2319,7 +2705,7 @@ Respond ONLY with this JSON (no other text):
                                 prop["post_deploy_health"] = f"{healthy}/{total}"
                                 log.info("Sentinel: post-deploy health: %d/%d", healthy, total)
 
-                                memory.remember(
+                                store_memory(
                                     f"Sentinel: deployed {pid[:8]} successfully. "
                                     f"Health: {healthy}/{total} peers online.",
                                     metadata={"type": "sentinel_verified", "proposal_id": pid},
@@ -2329,7 +2715,7 @@ Respond ONLY with this JSON (no other text):
                         else:
                             prop["status"] = "test_failed"
                             log.warning("Sentinel: %s failed tests: %s", pid[:8], test_results)
-                            memory.remember(
+                            store_memory(
                                 f"Sentinel: proposal {pid[:8]} FAILED tests: {test_results}",
                                 metadata={"type": "sentinel_test_fail"},
                             )
@@ -2340,7 +2726,7 @@ Respond ONLY with this JSON (no other text):
                         log.info("Sentinel: proposal %s %s", pid[:8], status.upper())
                         prop["status"] = status
                         _sentinel.active_proposal = None
-                        memory.remember(
+                        store_memory(
                             f"Sentinel: proposal {pid[:8]} {status} by swarm",
                             metadata={"type": "sentinel_consensus_result", "result": status},
                         )
@@ -2373,7 +2759,7 @@ Respond ONLY with this JSON (no other text):
                                 cortex_triage = cortex_result.get("result", "")
                                 if cortex_triage and "STABLE" in cortex_triage.upper():
                                     log.info("Sentinel: Cortex triage = STABLE -- skipping full analysis")
-                                    memory.remember(
+                                    store_memory(
                                         f"Cortex triage: swarm stable, no analysis needed",
                                         metadata={"type": "cortex_triage", "result": "stable"},
                                     )
@@ -2453,7 +2839,7 @@ with gr.Blocks(title=f"Synapse Brain -- {SPORE_ID}") as demo:
             return health_status()
         task_id = hashlib.sha256(f"{desc}{time.time()}".encode()).hexdigest()[:16]
         spore_state.get_or_create_task(task_id, desc.strip())
-        memory.remember(
+        store_memory(
             f"New task submitted: {desc.strip()}",
             metadata={"type": "task_submitted", "task_id": task_id},
         )
@@ -2502,7 +2888,7 @@ async def api_task_submit(request: Request):
         return JSONResponse({"error": "missing 'task' field"}, status_code=400)
     task_id = hashlib.sha256(f"{desc}{time.time()}".encode()).hexdigest()[:16]
     spore_state.get_or_create_task(task_id, desc)
-    memory.remember(
+    store_memory(
         f"Task received via API: {desc}",
         metadata={"type": "task_submitted", "task_id": task_id},
     )
@@ -2771,24 +3157,10 @@ async def api_federation_status():
 # Mount Gradio UI onto FastAPI -- both served on same port
 app = gr.mount_gradio_app(api, demo, path="/")
 
-# Wrap memory.remember through Knowledge Wall when available
+# Knowledge Wall routing is handled by store_memory() -- no monkey-patch needed.
+# All store_memory() call sites should use store_memory() for wall-aware routing.
 if dual_memory:
-    _original_remember = memory.remember
-    def _walled_remember(content, metadata=None):
-        key = _original_remember(content, metadata)
-        # Attempt distillation to collective (wall decides what crosses)
-        raw_entry = {"content": content, "metadata": metadata or {}}
-        distilled = knowledge_wall.distill(raw_entry)
-        if distilled:
-            import hashlib as _hlib
-            ckey = _hlib.sha256(
-                f"collective:{distilled['content']}:{distilled['provenance']}".encode()
-            ).hexdigest()[:16]
-            dual_memory._collective_keys.add(ckey)
-            dual_memory._collective_records[ckey] = distilled
-        return key
-    memory.remember = _walled_remember
-    log.info("Memory.remember wrapped through Knowledge Wall")
+    log.info("Knowledge Wall active -- store_memory() routes through DualMemory")
 
 # Start heartbeat in background thread
 threading.Thread(target=start_heartbeat, daemon=True).start()

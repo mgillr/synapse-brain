@@ -147,9 +147,7 @@ class SynapseMCPServer:
             if not query:
                 return {"error": "No query provided"}
             if layer == "collective" and self.dual_memory:
-                records = list(
-                    self.dual_memory._collective_records.values()
-                )[-top_k:]
+                records = self.dual_memory.recall_collective(query, top_k)
                 return {
                     "layer": "collective",
                     "results": records,
@@ -321,18 +319,14 @@ class SynapseMCPServer:
         def handle_collective(query: str = "", limit: int = 10) -> dict:
             if not self.dual_memory:
                 return {"error": "Dual memory not initialized"}
-            records = list(
-                self.dual_memory._collective_records.values()
-            )
             if query:
-                # Simple keyword match on collective
-                lower_q = query.lower()
-                records = [
-                    r for r in records
-                    if lower_q in r.get("content", "").lower()
-                ]
+                records = self.dual_memory.recall_collective(query, limit)
+            else:
+                records = list(
+                    self.dual_memory._collective_records.values()
+                )[-limit:]
             return {
-                "results": records[-limit:],
+                "results": records,
                 "total_collective": self.dual_memory.collective_size,
                 "wall_stats": self.dual_memory.wall.stats(),
             }
