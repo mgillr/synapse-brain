@@ -621,6 +621,35 @@ async def call_llm(prompt, system="", tier="any"):
                 log.warning("Model %s: %s", model.split("/")[-1], str(e)[:80])
                 continue
 
+    # Last resort: try Z.ai free models regardless of tier
+    if tier != "brain":
+        for name in ("zai_brain", "zai_fallback"):
+            conf = EXTERNAL_PROVIDERS.get(name, {})
+            key = os.environ.get(conf.get("env", ""))
+            if not key:
+                continue
+            try:
+                async with httpx.AsyncClient(timeout=90.0) as client:
+                    messages = []
+                    if system:
+                        messages.append({"role": "system", "content": system})
+                    messages.append({"role": "user", "content": prompt})
+                    start = time.time()
+                    resp = await client.post(
+                        conf["url"],
+                        headers={"Authorization": f"Bearer {key}"},
+                        json={"model": conf["model"], "messages": messages,
+                              "max_tokens": 2048, "temperature": 0.7},
+                    )
+                    resp.raise_for_status()
+                    text = extract_response_text(resp.json(), conf["model"])
+                    if text.strip():
+                        ms = (time.time() - start) * 1000
+                        return {"text": text, "provider": name, "model": conf["model"],
+                                "tier": "fallback", "latency_ms": round(ms, 1)}
+            except Exception as e:
+                log.warning("Fallback %s: %s", name, str(e)[:80])
+
     return {"text": "[all models failed]", "provider": "none", "model": "none",
             "tier": "none", "latency_ms": 0}
 
