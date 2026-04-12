@@ -74,15 +74,20 @@ except ImportError:
 # ---------------------------------------------------------------------------
 # Configuration (substituted per spore by launcher)
 # ---------------------------------------------------------------------------
-SPORE_ID = os.environ.get("SYNAPSE_SPORE_ID", "__SPORE_ID__")
-PEERS = json.loads(os.environ.get("SYNAPSE_PEERS", '__PEERS_JSON__'))
-SPORE_INDEX = int(os.environ.get("SYNAPSE_SPORE_INDEX", "__SPORE_INDEX__"))
+SPORE_ID = os.environ.get("SYNAPSE_SPORE_ID", f"standalone-{os.environ.get('HOSTNAME', 'spore')}")
+_peers_raw = os.environ.get("SYNAPSE_PEERS", "[]")
+if _peers_raw.startswith("__"):  # unsubstituted placeholder
+    _peers_raw = "[]"
+PEERS = json.loads(_peers_raw)
+_idx_raw = os.environ.get("SYNAPSE_SPORE_INDEX", "0")
+SPORE_INDEX = int(_idx_raw) if _idx_raw.isdigit() else 0
 PORT = int(os.environ.get("PORT", "7860"))
 HF_TOKEN = os.environ.get("HF_TOKEN", "")
 
 ROLES = ["explorer", "synthesizer", "adversarial", "validator", "generalist", "brain", "sentinel"]
 MY_ROLE = ROLES[SPORE_INDEX % len(ROLES)]
-PRIMARY_MODEL = os.environ.get("SYNAPSE_PRIMARY_MODEL", "__PRIMARY_MODEL__")
+_model_raw = os.environ.get("SYNAPSE_PRIMARY_MODEL", "qwen-flash")
+PRIMARY_MODEL = _model_raw if not _model_raw.startswith("__") else "qwen-flash"
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(name)s] %(message)s")
 log = logging.getLogger(SPORE_ID)
