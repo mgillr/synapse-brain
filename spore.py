@@ -568,55 +568,81 @@ def extract_response_text(resp_json, model):
 
 
 async def call_llm(prompt, system="", tier="any"):
-    """Call an LLM with model diversity and fallback chain.
+    """Call an LLM with full redundancy across all available providers.
 
-    brain tier: GLM-4.7-Flash via Z.ai first (free), then external workers, then HF.
-    worker/any tier: primary HF model first, then fallbacks.
+    Every spore tries every provider. Order depends on tier:
+      brain:  Z.ai brain -> Z.ai fallback -> external workers -> HF Router
+      worker: HF primary -> Z.ai -> external workers -> HF fallback models
+      any:    same as worker
+
+    Cooldowns are checked at every level. HF Router short-circuits on 402.
+    Every provider with a key gets tried before giving up.
     """
     if not HF_TOKEN:
         return {"text": "[no HF_TOKEN]", "provider": "none", "model": "none",
                 "tier": "none", "latency_ms": 0}
 
-    # Brain tier: try Z.ai free models first, then other externals
-    if tier == "brain":
-        brain_providers = [(n, c) for n, c in EXTERNAL_PROVIDERS.items()
-                           if c.get("tier") == "brain"]
-        worker_providers = [(n, c) for n, c in EXTERNAL_PROVIDERS.items()
-                            if c.get("tier") == "worker"]
-        ordered = brain_providers + worker_providers
-        for name, conf in ordered:
-            key = os.environ.get(conf["env"])
-            if not key:
-                continue
-            try:
-                async with httpx.AsyncClient(timeout=90.0) as client:
-                    messages = []
-                    if system:
-                        messages.append({"role": "system", "content": system})
-                    messages.append({"role": "user", "content": prompt})
-                    start = time.time()
-                    resp = await client.post(
-                        conf["url"],
-                        headers={"Authorization": f"Bearer {key}"},
-                        json={"model": conf["model"], "messages": messages,
-                              "max_tokens": 2048, "temperature": 0.7},
-                    )
-                    resp.raise_for_status()
-                    text = extract_response_text(resp.json(), conf["model"])
-                    ms = (time.time() - start) * 1000
-                    return {"text": text, "provider": name, "model": conf["model"],
-                            "tier": "brain", "latency_ms": round(ms, 1)}
-            except Exception as e:
-                log.warning("Brain provider %s failed: %s", name, e)
+    messages = []
+    if system:
+        messages.append({"role": "system", "content": system})
+    messages.append({"role": "user", "content": prompt})
 
-    # HF Router: primary model first, then fallbacks
+    # --- Phase 1: External providers (ordered by tier preference) ---
+    if tier == "brain":
+        # Brain: Z.ai first, then all workers
+        ext_order = (
+            [(n, c) for n, c in EXTERNAL_PROVIDERS.items() if c.get("tier") == "brain"]
+            + [(n, c) for n, c in EXTERNAL_PROVIDERS.items() if c.get("tier") == "worker"]
+        )
+    else:
+        # Worker: all workers first, then brain (Z.ai) as fallback
+        ext_order = (
+            [(n, c) for n, c in EXTERNAL_PROVIDERS.items() if c.get("tier") == "worker"]
+            + [(n, c) for n, c in EXTERNAL_PROVIDERS.items() if c.get("tier") == "brain"]
+        )
+
+    for name, conf in ext_order:
+        key = os.environ.get(conf.get("env", ""))
+        if not key:
+            continue
+        # Check cooldown before every attempt
+        if time.time() < _provider_cooldowns.get(name, 0):
+            continue
+        try:
+            async with httpx.AsyncClient(timeout=90.0) as client:
+                start = time.time()
+                resp = await client.post(
+                    conf["url"],
+                    headers={"Authorization": f"Bearer {key}"},
+                    json={"model": conf["model"], "messages": messages,
+                          "max_tokens": 2048, "temperature": 0.7},
+                )
+                resp.raise_for_status()
+                text = extract_response_text(resp.json(), conf["model"])
+                if not text.strip():
+                    # Empty response = soft rate limit (e.g. Z.ai returns 200 with empty content)
+                    log.warning("Provider %s returned empty response -- cooldown", name)
+                    _provider_cooldowns[name] = time.time() + COOLDOWN_SECONDS
+                    continue
+                ms = (time.time() - start) * 1000
+                log.info("LLM response from %s/%s in %.0fms", name, conf["model"], ms)
+                return {"text": text, "provider": name, "model": conf["model"],
+                        "tier": conf.get("tier", "fallback"), "latency_ms": round(ms, 1)}
+        except Exception as e:
+            err = str(e)
+            log.warning("Provider %s (%s): %s", name, conf["model"], err[:80])
+            if "429" in err or "rate" in err.lower() or "1302" in err:
+                _provider_cooldowns[name] = time.time() + COOLDOWN_SECONDS
+            elif "402" in err or "credit" in err.lower() or "quota" in err.lower():
+                _provider_cooldowns[name] = time.time() + COOLDOWN_SECONDS * 6  # 30 min for billing
+
+    # --- Phase 2: HF Router with short-circuit on 402 ---
+    hf_dead = False
     async with httpx.AsyncClient(timeout=60.0) as client:
         for model in FALLBACK_MODELS:
+            if hf_dead:
+                break
             try:
-                messages = []
-                if system:
-                    messages.append({"role": "system", "content": system})
-                messages.append({"role": "user", "content": prompt})
                 start = time.time()
                 resp = await client.post(
                     HF_ROUTER,
@@ -624,22 +650,36 @@ async def call_llm(prompt, system="", tier="any"):
                     json={"model": model, "messages": messages,
                           "max_tokens": 2048, "temperature": 0.7},
                 )
+                if resp.status_code == 402:
+                    log.warning("HF Router: credits depleted (402) -- skipping remaining models")
+                    hf_dead = True
+                    break
+                if resp.status_code == 429:
+                    log.warning("HF Router: rate limited (429) -- skipping remaining models")
+                    hf_dead = True
+                    break
                 resp.raise_for_status()
                 text = extract_response_text(resp.json(), model)
                 if not text.strip():
                     continue
                 ms = (time.time() - start) * 1000
                 is_primary = model == PRIMARY_MODEL
+                log.info("LLM response from HF/%s in %.0fms", model.split("/")[-1], ms)
                 return {
                     "text": text,
                     "provider": f"hf_{'primary' if is_primary else 'fallback'}",
                     "model": model, "tier": "worker", "latency_ms": round(ms, 1),
                 }
             except Exception as e:
-                log.warning("Model %s: %s", model.split("/")[-1], str(e)[:80])
+                err = str(e)
+                if "402" in err or "credit" in err.lower():
+                    hf_dead = True
+                    break
+                log.warning("HF %s: %s", model.split("/")[-1], err[:80])
                 continue
 
-    # Last resort: try ALL external providers regardless of tier
+    # --- Phase 3: Retry any external provider not on cooldown ---
+    # (handles case where Phase 1 cooldowns have expired during HF attempts)
     for name, conf in EXTERNAL_PROVIDERS.items():
         key = os.environ.get(conf.get("env", ""))
         if not key:
@@ -648,10 +688,6 @@ async def call_llm(prompt, system="", tier="any"):
             continue
         try:
             async with httpx.AsyncClient(timeout=90.0) as client:
-                messages = []
-                if system:
-                    messages.append({"role": "system", "content": system})
-                messages.append({"role": "user", "content": prompt})
                 start = time.time()
                 resp = await client.post(
                     conf["url"],
@@ -663,17 +699,19 @@ async def call_llm(prompt, system="", tier="any"):
                 text = extract_response_text(resp.json(), conf["model"])
                 if text.strip():
                     ms = (time.time() - start) * 1000
+                    log.info("LLM response (retry) from %s/%s in %.0fms", name, conf["model"], ms)
                     return {"text": text, "provider": name, "model": conf["model"],
                             "tier": "fallback", "latency_ms": round(ms, 1)}
                 else:
                     _provider_cooldowns[name] = time.time() + COOLDOWN_SECONDS
         except Exception as e:
-            log.warning("Fallback %s: %s", name, str(e)[:80])
+            log.warning("Retry %s: %s", name, str(e)[:80])
             if "429" in str(e) or "rate" in str(e).lower() or "credit" in str(e).lower():
                 _provider_cooldowns[name] = time.time() + COOLDOWN_SECONDS
 
     return {"text": "[all models failed]", "provider": "none", "model": "none",
             "tier": "none", "latency_ms": 0}
+
 
 
 # ---------------------------------------------------------------------------
