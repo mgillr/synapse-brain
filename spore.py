@@ -825,7 +825,7 @@ def build_system_prompt(task, cycle, agreement_history):
         mem_lines = []
         for m in relevant_memories:
             src = m.get("spore", "?")
-            content = m.get("content", "")[:200]
+            content = m.get("content", "")
             sim = m.get("similarity", 0)
             mem_lines.append(f"  [{src}, relevance {sim:.0%}] {content}")
         memory_ctx = "\n".join(mem_lines)
@@ -934,7 +934,7 @@ async def reason_on_task(task):
         pass
 
     if not parsed:
-        parsed = {"hypothesis": text[:300], "claims": [], "confidence": 0.3,
+        parsed = {"hypothesis": text, "claims": [], "confidence": 0.3,
                   "response_to_peers": ""}
 
     delta = {
@@ -1017,7 +1017,7 @@ async def reason_on_task(task):
             task.converged = True
             task.final_answer = synthesis
             memory.remember(
-                f"[SYNTHESIS task {task.task_id[:8]}] {synthesis[:500]}",
+                f"[SYNTHESIS task {task.task_id[:8]}] {synthesis}",
                 metadata={"type": "synthesis", "task_id": task.task_id},
             )
 
@@ -2072,7 +2072,7 @@ with gr.Blocks(title=f"Synapse Brain -- {SPORE_ID}") as demo:
         task_id = hashlib.sha256(f"{desc}{time.time()}".encode()).hexdigest()[:16]
         spore_state.get_or_create_task(task_id, desc.strip())
         memory.remember(
-            f"New task submitted: {desc.strip()[:200]}",
+            f"New task submitted: {desc.strip()}",
             metadata={"type": "task_submitted", "task_id": task_id},
         )
         return health_status()
@@ -2104,7 +2104,7 @@ async def api_task_submit(request: Request):
     task_id = hashlib.sha256(f"{desc}{time.time()}".encode()).hexdigest()[:16]
     spore_state.get_or_create_task(task_id, desc)
     memory.remember(
-        f"Task received via API: {desc[:200]}",
+        f"Task received via API: {desc}",
         metadata={"type": "task_submitted", "task_id": task_id},
     )
     return JSONResponse({"status": "ok", "task_id": task_id})
