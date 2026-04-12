@@ -29,7 +29,7 @@ log = logging.getLogger("cortex")
 
 # Model configuration
 MODEL_REPO = "Qwen/Qwen3-4B-GGUF"
-MODEL_FILE = "qwen3-4b-q4_k_m.gguf"
+MODEL_FILE = "Qwen3-4B-Q4_K_M.gguf"
 MODEL_DIR = "/tmp/cortex_model"
 CONTEXT_SIZE = 4096
 MAX_TOKENS = 1024

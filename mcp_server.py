@@ -101,18 +101,19 @@ class SynapseMCPServer:
         """Register all default spore tools."""
 
         # --- submit_task ---
-        def handle_submit_task(description: str = "",
+        def handle_submit_task(task: str = "",
                                priority: str = "normal") -> dict:
-            if not self.spore_state or not description:
-                return {"error": "No task description provided"}
+            desc = task
+            if not self.spore_state or not desc:
+                return {"error": "No task provided"}
             tid = hashlib.sha256(
-                f"{description}:{time.time()}".encode()
+                f"{desc}:{time.time()}".encode()
             ).hexdigest()[:16]
-            task = self.spore_state.get_or_create_task(tid, description)
+            t = self.spore_state.get_or_create_task(tid, desc)
             return {
                 "task_id": tid,
                 "status": "submitted",
-                "description": description,
+                "task": desc,
                 "spore": self.spore_id,
             }
 
@@ -124,7 +125,7 @@ class SynapseMCPServer:
             {
                 "type": "object",
                 "properties": {
-                    "description": {
+                    "task": {
                         "type": "string",
                         "description": "The task or question to reason about",
                     },
@@ -134,7 +135,7 @@ class SynapseMCPServer:
                         "description": "Task priority level",
                     },
                 },
-                "required": ["description"],
+                "required": ["task"],
             },
             handle_submit_task,
         )
