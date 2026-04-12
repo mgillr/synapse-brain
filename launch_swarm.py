@@ -188,9 +188,8 @@ Spore ID: `{spore_id}`
         if mod_path.exists():
             module_files[mod_name] = mod_path.read_text()
 
-    # Sentinel gets Cortex-enabled requirements (llama-cpp-python)
-    if spore_index == total_spores - 1:  # Last spore is always Sentinel
-        requirements_txt += "llama-cpp-python>=0.3.0\n"
+    # Sentinel Cortex: llama-cpp-python installed at runtime if available
+    # Package too large for pip install in build step -- Cortex degrades gracefully
 
     result = {
         "app.py": app_py,
