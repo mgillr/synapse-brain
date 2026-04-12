@@ -101,7 +101,6 @@ THINKING_MODELS = {
     "Qwen/QwQ-32B",
     "glm-4.5-flash",
     "glm-4.7-flash",
-    "grok-3-mini",
 }
 
 ALL_HF_MODELS = [
@@ -116,37 +115,10 @@ ALL_HF_MODELS = [
 ]
 
 EXTERNAL_PROVIDERS = {
-    # -- Brain tier: strongest reasoning models --
-    # Ordering interleaves companies for maximum redundancy:
-    # If company A fails, next try is always a DIFFERENT company.
     "zai_brain": {
         "env": "ZAI_API_KEY",
         "url": "https://api.z.ai/api/paas/v4/chat/completions",
         "model": "glm-4.7-flash",
-        "tier": "brain",
-    },
-    "xai_reasoning": {
-        "env": "XAI_API_KEY",
-        "url": "https://api.x.ai/v1/chat/completions",
-        "model": "grok-3-mini",
-        "tier": "brain",
-    },
-    "github_brain": {
-        "env": "GITHUB_MODELS_TOKEN",
-        "url": "https://models.inference.ai.azure.com/chat/completions",
-        "model": "Meta-Llama-3.1-405B-Instruct",
-        "tier": "brain",
-    },
-    "openrouter_brain": {
-        "env": "OPENROUTER_KEY",
-        "url": "https://openrouter.ai/api/v1/chat/completions",
-        "model": "nvidia/nemotron-3-super-120b-a12b:free",
-        "tier": "brain",
-    },
-    "llmapi_brain": {
-        "env": "LLMAPI_KEY",
-        "url": "https://api.llmapi.ai/v1/chat/completions",
-        "model": "qwen3-235b-a22b-fp8",
         "tier": "brain",
     },
     "zai_fallback": {
@@ -154,38 +126,6 @@ EXTERNAL_PROVIDERS = {
         "url": "https://api.z.ai/api/paas/v4/chat/completions",
         "model": "glm-4.5-flash",
         "tier": "brain",
-    },
-    # -- Worker tier: fast, reliable models --
-    # Same interleaving principle across different companies.
-    "xai": {
-        "env": "XAI_API_KEY",
-        "url": "https://api.x.ai/v1/chat/completions",
-        "model": "grok-3-mini-fast",
-        "tier": "worker",
-    },
-    "google_ai": {
-        "env": "GOOGLE_AI_KEY",
-        "url": "https://generativelanguage.googleapis.com/v1beta/openai/chat/completions",
-        "model": "gemini-2.5-flash",
-        "tier": "worker",
-    },
-    "github_worker": {
-        "env": "GITHUB_MODELS_TOKEN",
-        "url": "https://models.inference.ai.azure.com/chat/completions",
-        "model": "gpt-4o-mini",
-        "tier": "worker",
-    },
-    "llmapi_worker": {
-        "env": "LLMAPI_KEY",
-        "url": "https://api.llmapi.ai/v1/chat/completions",
-        "model": "qwen-flash",
-        "tier": "worker",
-    },
-    "openrouter_worker": {
-        "env": "OPENROUTER_KEY",
-        "url": "https://openrouter.ai/api/v1/chat/completions",
-        "model": "google/gemma-4-26b-a4b-it:free",
-        "tier": "worker",
     },
     "groq": {
         "env": "GROQ_API_KEY",
@@ -197,6 +137,18 @@ EXTERNAL_PROVIDERS = {
         "env": "CEREBRAS_API_KEY",
         "url": "https://api.cerebras.ai/v1/chat/completions",
         "model": "llama3.3-70b",
+        "tier": "worker",
+    },
+    "google_ai": {
+        "env": "GOOGLE_AI_KEY",
+        "url": "https://generativelanguage.googleapis.com/v1beta/openai/chat/completions",
+        "model": "gemini-2.0-flash",
+        "tier": "worker",
+    },
+    "openrouter": {
+        "env": "OPENROUTER_API_KEY",
+        "url": "https://openrouter.ai/api/v1/chat/completions",
+        "model": "google/gemini-2.0-flash-exp:free",
         "tier": "worker",
     },
 }
@@ -1446,21 +1398,45 @@ async def heartbeat():
 
     Every 20 seconds:
     1. Gossip state to all peers (memory + trust + deltas)
-    2. Reason on active unconverged tasks
+    2. Reason on active unconverged tasks (priority-scheduled)
     3. Analyze own temporal patterns
     """
     while True:
         try:
             await gossip_push()
 
-            # Reason on unconverged tasks
+            # Reason on unconverged tasks with priority scheduling
             active = [
                 t for t in spore_state.tasks.values()
                 if not t.converged and t.description
             ]
 
+            # Dedup: skip tasks with identical descriptions (keep earliest)
+            seen_desc = {}
+            deduped = []
             for task in active:
-                # Rate limit: one reasoning cycle per task per heartbeat
+                desc_key = task.description[:200].strip().lower()
+                if desc_key not in seen_desc:
+                    seen_desc[desc_key] = task.task_id
+                    deduped.append(task)
+                else:
+                    # Mark duplicate as converged so it stops consuming cycles
+                    task.converged = True
+                    task.final_answer = f"[dedup: see {seen_desc[desc_key][:12]}]"
+            active = deduped
+
+            # Priority: untouched tasks first, then fewest cycles, cap at 8
+            untouched = [t for t in active if t.my_cycles == 0]
+            in_progress = [t for t in active if 0 < t.my_cycles < 8]
+            in_progress.sort(key=lambda t: t.my_cycles)
+
+            # Process untouched first (every task gets at least one pass)
+            # then in-progress sorted by fewest cycles
+            scheduled = untouched + in_progress
+
+            # Limit tasks per heartbeat to prevent starvation
+            max_per_beat = 5
+            for task in scheduled[:max_per_beat]:
                 try:
                     await reason_on_task(task)
                 except Exception as e:
