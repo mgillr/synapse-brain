@@ -153,7 +153,18 @@ class Cortex:
             else:
                 log.info("Cortex: model already cached at %s", model_path)
 
-            from llama_cpp import Llama
+            try:
+                from llama_cpp import Llama
+            except ImportError:
+                log.info("Cortex: llama-cpp-python not installed -- building from source")
+                import subprocess
+                env = {**os.environ, "CMAKE_ARGS": "-DGGML_NATIVE=OFF -DGGML_BLAS=OFF -DGGML_OPENMP=OFF"}
+                subprocess.check_call(
+                    ["pip", "install", "llama-cpp-python>=0.3.19", "--no-cache-dir"],
+                    env=env, timeout=1200
+                )
+                log.info("Cortex: llama-cpp-python installed")
+                from llama_cpp import Llama
             self.model = Llama(
                 model_path=model_path,
                 n_ctx=CONTEXT_SIZE,
