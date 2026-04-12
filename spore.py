@@ -1773,6 +1773,7 @@ Respond ONLY with this JSON (no other text):
                         repo_id=space, filename="app.py",
                         repo_type="space", token=hf_token,
                         cache_dir="/tmp/sentinel_cache",
+                        force_download=True,
                     )
                     with open(local_path, "r") as f:
                         current_app = f.read()
