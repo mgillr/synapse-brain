@@ -242,16 +242,21 @@ def generate_spore_app(
 
     is_sentinel = ROLE_NAMES[spore_index] == "Sentinel"
 
+    sentinel_prefix = (
+        "--extra-index-url https://abetlen.github.io/llama-cpp-python/whl/cpu\n"
+        if is_sentinel else ""
+    )
+    sentinel_suffix = "llama-cpp-python==0.3.19\n" if is_sentinel else ""
     requirements_txt = (
+        f"{sentinel_prefix}"
         "crdt-merge>=0.9.5\n"
         "httpx>=0.27\n"
         "numpy>=1.24\n"
         "sentence-transformers>=3.0\n"
         "fastapi>=0.115\n"
         "uvicorn>=0.30\n"
+        f"{sentinel_suffix}"
     )
-    if is_sentinel:
-        requirements_txt += "llama-cpp-python>=0.3.0\n"
 
     python_line = 'python_version: "3.10"\n' if is_sentinel else ""
     readme_md = (
