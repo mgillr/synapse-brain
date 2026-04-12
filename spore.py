@@ -1398,16 +1398,51 @@ def handle_gossip_request(data):
 # ---------------------------------------------------------------------------
 HEARTBEAT_INTERVAL = 20  # seconds
 
+# Self-ping URL: keeps the Space awake by generating incoming traffic
+# through the public load balancer. Localhost pings do not count.
+_space_id = os.environ.get("SPACE_ID", "")
+if _space_id:
+    # SPACE_ID format: "Optitransfer/synapse-spore-000"
+    SELF_URL = f"https://{_space_id.replace('/', '-').lower()}.hf.space"
+elif _HF_SPACE_OWNER and SPORE_ID:
+    SELF_URL = f"https://{_HF_SPACE_OWNER.lower()}-synapse-{SPORE_ID}.hf.space"
+else:
+    SELF_URL = ""
+
+_keepalive_counter = 0
+
+async def _self_ping():
+    """Ping own public URL to prevent HF Spaces sleep.
+
+    Runs every 6th heartbeat (~2 min). A single GET /api/health through
+    the external load balancer counts as incoming traffic and resets the
+    inactivity timer. Auth header included for private Spaces.
+    """
+    global _keepalive_counter
+    _keepalive_counter += 1
+    if not SELF_URL or _keepalive_counter % 6 != 0:
+        return
+    try:
+        async with httpx.AsyncClient(timeout=8.0, headers=HF_AUTH) as client:
+            resp = await client.get(f"{SELF_URL}/api/health")
+            if resp.status_code == 200:
+                log.debug("Keep-alive: self-ping OK")
+    except Exception:
+        pass  # Non-critical -- gossip cross-pings also prevent sleep
+
+
 async def heartbeat():
     """Main heartbeat: gossip, reason, learn.
 
     Every 20 seconds:
-    1. Gossip state to all peers (memory + trust + deltas)
-    2. Reason on active unconverged tasks (priority-scheduled)
-    3. Analyze own temporal patterns
+    1. Self-ping to prevent Space sleep
+    2. Gossip state to all peers (memory + trust + deltas)
+    3. Reason on active unconverged tasks (priority-scheduled)
+    4. Analyze own temporal patterns
     """
     while True:
         try:
+            await _self_ping()
             await gossip_push()
 
             # Reason on unconverged tasks with priority scheduling
