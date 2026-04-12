@@ -158,4 +158,4 @@ Track these metrics to observe the system evolving:
 - **Trust stability**: Trust scores should stabilize as spores establish track records
 - **Cross-pollination rate**: Knowledge from one task should appear in reasoning
   about unrelated tasks (measured by semantic similarity of retrieved context)
-- **Anomaly rate**: Should decrease as the temporal baseline becomes more robust
+- **Anomaly rate**: Should decrease as the temporal baseline becomes more stable

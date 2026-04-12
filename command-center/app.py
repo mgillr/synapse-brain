@@ -12,19 +12,19 @@ HEADERS = {"Authorization": f"Bearer {HF_TOKEN}"} if HF_TOKEN else {}
 
 # Core spores -- bootstrap. Federation nodes discovered dynamically.
 CORE_SPORES = [
-    {"id": "000", "url": "https://optitransfer-synapse-spore-000.hf.space", "role": "Explorer", "model": "Qwen3 235B MoE", "color": "#3b82f6", "commander": "optitransfer"},
-    {"id": "001", "url": "https://optitransfer-synapse-spore-001.hf.space", "role": "Synthesizer", "model": "Llama 3.3 70B", "color": "#8b5cf6", "commander": "optitransfer"},
-    {"id": "002", "url": "https://optitransfer-synapse-spore-002.hf.space", "role": "Adversarial", "model": "DeepSeek R1 32B", "color": "#ef4444", "commander": "optitransfer"},
-    {"id": "003", "url": "https://optitransfer-synapse-spore-003.hf.space", "role": "Validator", "model": "Gemma 3 27B", "color": "#f59e0b", "commander": "optitransfer"},
-    {"id": "004", "url": "https://optitransfer-synapse-spore-004.hf.space", "role": "Generalist", "model": "Llama 4 Scout 17B", "color": "#10b981", "commander": "optitransfer"},
-    {"id": "005", "url": "https://optitransfer-synapse-spore-005.hf.space", "role": "Brain", "model": "GLM-4.7-Flash", "color": "#ec4899", "commander": "optitransfer"},
-    {"id": "006", "url": "https://optitransfer-synapse-spore-006.hf.space", "role": "Sentinel", "model": "DeepSeek R1 671B", "color": "#f97316", "commander": "optitransfer"},
+    {"id": "000", "url": "https://<your-prefix>-synapse-spore-000.hf.space", "role": "Explorer", "model": "Qwen3 235B MoE", "color": "#3b82f6", "commander": "default"},
+    {"id": "001", "url": "https://<your-prefix>-synapse-spore-001.hf.space", "role": "Synthesizer", "model": "Llama 3.3 70B", "color": "#8b5cf6", "commander": "default"},
+    {"id": "002", "url": "https://<your-prefix>-synapse-spore-002.hf.space", "role": "Adversarial", "model": "DeepSeek R1 32B", "color": "#ef4444", "commander": "default"},
+    {"id": "003", "url": "https://<your-prefix>-synapse-spore-003.hf.space", "role": "Validator", "model": "Gemma 3 27B", "color": "#f59e0b", "commander": "default"},
+    {"id": "004", "url": "https://<your-prefix>-synapse-spore-004.hf.space", "role": "Generalist", "model": "Llama 4 Scout 17B", "color": "#10b981", "commander": "default"},
+    {"id": "005", "url": "https://<your-prefix>-synapse-spore-005.hf.space", "role": "Brain", "model": "GLM-4.7-Flash", "color": "#ec4899", "commander": "default"},
+    {"id": "006", "url": "https://<your-prefix>-synapse-spore-006.hf.space", "role": "Sentinel", "model": "DeepSeek R1 671B", "color": "#f97316", "commander": "default"},
 ]
 
 # Dynamic registry -- populated at runtime from gossip + federation
 _registry = {
     "nodes": {s["id"]: s for s in CORE_SPORES},
-    "commanders": {"optitransfer": {"name": "Optitransfer", "color": "#f97316", "sentinel": "006"}},
+    "commanders": {"default": {"name": "Default", "color": "#f97316", "sentinel": "006"}},
     "lock": threading.Lock(),
     "last_discovery": 0,
     "current_task": None,
@@ -673,7 +673,7 @@ PLATFORM_COORDS = {
     "google-cloud": (33.45, -111.98),     # Phoenix
     "koyeb": (48.86, 2.35),              # Paris
     "replit": (37.77, -122.42),           # San Francisco
-    "optitransfer": (47.38, 8.54),        # Zurich (home base)
+    "default": (47.38, 8.54),        # Zurich (example)
     "unknown": (0, 0),
 }
 
@@ -693,7 +693,7 @@ def build_globe_map():
     positioned = []
     for nid, n in nodes.items():
         platform = n.get("platform", "hf-spaces")
-        commander = n.get("commander", "optitransfer")
+        commander = n.get("commander", "default")
         # Try commander-specific coords first, then platform
         if commander in PLATFORM_COORDS:
             lat, lon = PLATFORM_COORDS[commander]

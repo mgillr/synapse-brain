@@ -106,7 +106,7 @@ MODEL_ASSIGNMENTS = [
     "deepseek-ai/DeepSeek-R1",                   # 6: Sentinel    -- full 671B MoE reasoning (strongest)
 ]
 
-# Spores that get the Z.ai API key for brain-tier access
+# Spores that get the Z.ai API key for brain-level routing
 ZAI_SPORE_INDICES = {3, 5, 6}  # Validator + Brain + Sentinel (all brain-tier)
 
 

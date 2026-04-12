@@ -26,6 +26,14 @@ import threading
 import time
 from collections import defaultdict
 
+# Repo/deployment config -- override via environment for your own deployment
+_REPO_OWNER = os.environ.get("SYNAPSE_REPO_OWNER", "")
+_REPO_NAME = os.environ.get("SYNAPSE_REPO_NAME", "synapse-brain")
+_GITHUB_REPO = f"{_REPO_OWNER}/{_REPO_NAME}" if _REPO_OWNER else ""
+_COMMITTER_NAME = os.environ.get("SYNAPSE_COMMITTER_NAME", "")
+_COMMITTER_EMAIL = os.environ.get("SYNAPSE_COMMITTER_EMAIL", "")
+_HF_SPACE_OWNER = os.environ.get("HF_SPACE_OWNER", "")
+
 import gradio as gr
 import httpx
 from sklearn.feature_extraction.text import TfidfVectorizer
@@ -462,7 +470,7 @@ class TemporalLearner:
                 if avg < 0.3:
                     insights.append(f"Weak in {phase} phase -- dedicate more effort")
                 elif avg > 0.8:
-                    insights.append(f"Strong in {phase} phase -- leverage this")
+                    insights.append(f"Strong in {phase} phase -- build on this")
 
         # Citation impact
         total_cites = sum(self.peer_citations.values())
@@ -769,7 +777,7 @@ PHASE_INSTRUCTIONS = {
         "Propose a unified position incorporating the strongest elements from everyone."
     ),
     "synthesize": (
-        "SYNTHESIZE: produce a comprehensive final answer. Combine all validated insights. "
+        "SYNTHESIZE: produce a complete final answer. Combine all validated insights. "
         "Be specific, actionable, and complete. This is the synthesis round."
     ),
 }
@@ -1129,7 +1137,7 @@ Weight each contribution by its trust score (0-1).
 {chr(10).join(parts)}
 {memory_block}
 
-Produce the FINAL comprehensive answer.
+Produce the FINAL complete answer.
 Resolve contradictions favoring higher-trust contributors.
 Be specific, actionable, and complete.
 Do NOT mention the swarm, spores, trust, or reasoning process. Just deliver the answer."""
@@ -1795,7 +1803,7 @@ Respond ONLY with this JSON (no other text):
             try:
                 headers = {"Authorization": f"token {gh_token}", "Accept": "application/vnd.github.v3+json"}
                 async with httpx.AsyncClient(timeout=20, headers=headers) as gh:
-                    resp = await gh.get(f"https://api.github.com/repos/mgillr/synapse-brain/contents/{target_file}")
+                    resp = await gh.get(f"https://api.github.com/repos/{_GITHUB_REPO}/contents/{target_file}")
                     if resp.status_code != 200:
                         log.error("Sentinel: failed to fetch %s from GitHub: %d", target_file, resp.status_code)
                         return results
@@ -1925,12 +1933,12 @@ Respond ONLY with this JSON (no other text):
                 encoded = _b64.b64encode(validated_content.encode()).decode()
                 async with httpx.AsyncClient(timeout=30, headers=gh_headers) as gh:
                     resp = await gh.put(
-                        f"https://api.github.com/repos/mgillr/synapse-brain/contents/{target_file}",
+                        f"https://api.github.com/repos/{_GITHUB_REPO}/contents/{target_file}",
                         json={
                             "message": commit_msg,
                             "content": encoded,
                             "sha": file_sha,
-                            "committer": {"name": "mgillr", "email": "rgillespie83@icloud.com"},
+                            "committer": {"name": _COMMITTER_NAME, "email": _COMMITTER_EMAIL},
                         },
                     )
                     if resp.status_code not in (200, 201):
@@ -1956,8 +1964,8 @@ Respond ONLY with this JSON (no other text):
 
             # ---- STEP 2: Rolling deploy to HF Spaces ----
             hf_api = HfApi(token=hf_token)
-            all_spaces = [f"Optitransfer/synapse-spore-{i:03d}" for i in range(7)]
-            my_space = f"Optitransfer/synapse-spore-{SPORE_INDEX:03d}"
+            all_spaces = [f"{_HF_SPACE_OWNER}/synapse-spore-{i:03d}" for i in range(7)]
+            my_space = f"{_HF_SPACE_OWNER}/synapse-spore-{SPORE_INDEX:03d}"
             rollback_store = {}
 
             for space in all_spaces:
@@ -2078,12 +2086,12 @@ Respond ONLY with this JSON (no other text):
             encoded = _b64.b64encode(original_content.encode()).decode()
             async with httpx.AsyncClient(timeout=30, headers=gh_headers) as gh:
                 resp = await gh.put(
-                    f"https://api.github.com/repos/mgillr/synapse-brain/contents/{target_file}",
+                    f"https://api.github.com/repos/{_GITHUB_REPO}/contents/{target_file}",
                     json={
                         "message": f"Revert: {original_msg}",
                         "content": encoded,
                         "sha": current_sha,
-                        "committer": {"name": "mgillr", "email": "rgillespie83@icloud.com"},
+                        "committer": {"name": _COMMITTER_NAME, "email": _COMMITTER_EMAIL},
                     },
                 )
                 if resp.status_code in (200, 201):

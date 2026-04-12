@@ -245,7 +245,7 @@ class SynapseMCPServer:
 
         self.register_tool(
             "swarm_health",
-            "Get comprehensive health status of this spore including "
+            "Get full health status of this spore including "
             "reasoning cycles, delta throughput, memory size, peer "
             "connectivity, and Cortex status.",
             {"type": "object", "properties": {}},

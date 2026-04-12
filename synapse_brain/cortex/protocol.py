@@ -181,7 +181,7 @@ def build_role_prompt(role: SporeRole) -> str:
         SporeRole.REFINER: (
             "YOUR SPECIALIZATION: REFINER\n"
             "You are biased toward evaluation. Score every hypothesis on probability, "
-            "feasibility, and temporal leverage. Run the murder board. Gate resources. "
+            "feasibility, and temporal advantage. Run the murder board. Gate resources. "
             "Your highest-value output is a ranked, scored set of surviving hypotheses "
             "with clear kill criteria for each."
         ),

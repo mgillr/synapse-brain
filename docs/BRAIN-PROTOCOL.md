@@ -68,7 +68,7 @@ natural fit for structured logical challenge.
 Primary emphasis: Quality assurance, truth verification, convergence approval.
 
 The Validator is the quality gate. It reviews synthesized answers before they become
-persistent knowledge. Has dual-tier access: Gemma 3 27B for standard validation,
+persistent knowledge. Has dual-model access: Gemma 3 27B for standard validation,
 plus brain-tier escalation to GLM-4.7-Flash via Z.ai for deep verification of
 critical convergence points.
 

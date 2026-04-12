@@ -50,16 +50,16 @@ hf_owner: ""
 # --- SWARM PEERS ---
 # Core swarm peers for initial gossip mesh connection.
 # Your spores will discover additional peers through gossip.
-# Leave default to connect to the Optitransfer core swarm.
+# Replace with the URLs of the swarm you want to join.
 
 peers:
-  - "https://optitransfer-synapse-spore-000.hf.space"
-  - "https://optitransfer-synapse-spore-001.hf.space"
-  - "https://optitransfer-synapse-spore-002.hf.space"
-  - "https://optitransfer-synapse-spore-003.hf.space"
-  - "https://optitransfer-synapse-spore-004.hf.space"
-  - "https://optitransfer-synapse-spore-005.hf.space"
-  - "https://optitransfer-synapse-spore-006.hf.space"
+  - "https://<your-prefix>-synapse-spore-000.hf.space"
+  - "https://<your-prefix>-synapse-spore-001.hf.space"
+  - "https://<your-prefix>-synapse-spore-002.hf.space"
+  - "https://<your-prefix>-synapse-spore-003.hf.space"
+  - "https://<your-prefix>-synapse-spore-004.hf.space"
+  - "https://<your-prefix>-synapse-spore-005.hf.space"
+  - "https://<your-prefix>-synapse-spore-006.hf.space"
 
 # --- ADVANCED ---
 

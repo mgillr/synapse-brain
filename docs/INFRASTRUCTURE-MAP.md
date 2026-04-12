@@ -6,18 +6,18 @@
 
 | Space | Role | Model | Z.ai Access |
 |-------|------|-------|-------------|
-| `Optitransfer/synapse-spore-000` | Explorer | Qwen3 235B MoE | No |
-| `Optitransfer/synapse-spore-001` | Synthesizer | Llama 3.3 70B | No |
-| `Optitransfer/synapse-spore-002` | Adversarial | DeepSeek R1 32B | No |
-| `Optitransfer/synapse-spore-003` | Validator | Gemma 3 27B | Yes (brain tier) |
-| `Optitransfer/synapse-spore-004` | Generalist | Llama 4 Scout 17B | No |
-| `Optitransfer/synapse-spore-005` | Brain | GLM-4.7-Flash | Yes (primary) |
+| `<your-org>/synapse-spore-000` | Explorer | Qwen3 235B MoE | No |
+| `<your-org>/synapse-spore-001` | Synthesizer | Llama 3.3 70B | No |
+| `<your-org>/synapse-spore-002` | Adversarial | DeepSeek R1 32B | No |
+| `<your-org>/synapse-spore-003` | Validator | Gemma 3 27B | Yes (brain tier) |
+| `<your-org>/synapse-spore-004` | Generalist | Llama 4 Scout 17B | No |
+| `<your-org>/synapse-spore-005` | Brain | GLM-4.7-Flash | Yes (primary) |
 
 ### Monitoring
 
 | Space | Purpose |
 |-------|---------|
-| `Optitransfer/synapse-command-center` | Real-time dashboard + conversation stream |
+| `<your-org>/synapse-command-center` | Real-time dashboard + conversation stream |
 
 ### External Dependencies
 

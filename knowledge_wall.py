@@ -10,7 +10,7 @@ Architecture:
   - HMAC-SHA256 provenance binding (anonymous source proof)
   - PII detection and destruction at the boundary
   - Full audit trail of every wall crossing
-  - Conflict class isolation for enterprise tenants
+  - Conflict class isolation for multi-tenant deployments
 
 Nothing from private memory enters collective memory without passing
 through the Knowledge Wall. Raw conversations are destroyed, not encrypted.
@@ -100,7 +100,7 @@ class AuditEntry:
 
 
 class ConflictClass:
-    """Brewer-Nash conflict class for enterprise isolation."""
+    """Brewer-Nash conflict class for organization isolation."""
 
     def __init__(self, name: str, members: set[str] | None = None):
         self.name = name

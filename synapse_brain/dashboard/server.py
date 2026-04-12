@@ -366,7 +366,9 @@ async def stop_background(app: web.Application) -> None:
 # ---------------------------------------------------------------------------
 
 HF_SPORE_URLS = [
-    f"https://optitransfer-synapse-spore-{i:03d}.hf.space" for i in range(5)
+    url.strip() for url in os.environ.get("SYNAPSE_SPORE_URLS", "").split(",") if url.strip()
+] or [
+    f"https://{os.environ.get('HF_SPACE_PREFIX', 'synapse-spore')}-{i:03d}.hf.space" for i in range(5)
 ]
 
 async def _fetch_spore(session: aiohttp.ClientSession, url: str, hf_token: str) -> dict[str, Any]:
@@ -420,7 +422,7 @@ async def api_live_snapshot(request: web.Request) -> web.Response:
     if not hf_token:
         token_path = Path.home() / ".hf_token"
         if not token_path.exists():
-            token_path = Path("/agent/home/.hf_token")
+            token_path = Path.home() / ".cache" / "huggingface" / "token"
         if token_path.exists():
             hf_token = token_path.read_text().strip()
 

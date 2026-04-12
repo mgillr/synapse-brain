@@ -94,8 +94,7 @@ python spore.py  # single spore, local mode
 
 ### Option 3: Join the existing swarm
 
-Edit `config.yaml` to point your spores at the existing Optitransfer core
-swarm as peers. Your nodes will automatically discover and gossip with the
+Edit `config.yaml` to point your spores at an existing swarm as peers. Your nodes will automatically discover and gossip with the
 network.
 
 ## Configuration
