@@ -3696,10 +3696,34 @@ async def api_cognition():
     })
 
 
+
+def _is_real_answer(task):
+    """Filter noise: dedup markers, LLM failures, empty answers."""
+    fa = getattr(task, 'final_answer', None) or ""
+    if not fa or len(fa.strip()) < 20:
+        return False
+    if fa.startswith("[dedup:"):
+        return False
+    if "[all models failed]" in fa:
+        return False
+    return True
+
+
+def _is_real_task(task):
+    """Filter tasks that have meaningful content (answer OR active reasoning)."""
+    fa = getattr(task, 'final_answer', None) or ""
+    if fa.startswith("[dedup:"):
+        return False
+    if fa == "[all models failed]" and len(task.deltas) == 0:
+        return False
+    return True
+
 @api.get("/api/tasks")
 async def api_tasks():
     result = {}
     for tid, task in spore_state.tasks.items():
+        if not _is_real_task(task):
+            continue
         result[tid] = {
             "description": task.description,
             "delta_count": len(task.deltas),
@@ -3918,9 +3942,11 @@ async def api_sidecar():
 
 @api.get("/api/convergence")
 async def api_convergence():
-    """Convergence metrics across all active tasks."""
+    """Convergence metrics across all active tasks (noise filtered)."""
     task_convergence = []
     for tid, task in list(spore_state.tasks.items()):
+        if not _is_real_task(task):
+            continue
         latest = []
         for d in task.deltas[-20:]:
             content = d.get("content", "")
@@ -3956,6 +3982,26 @@ async def api_convergence():
         "tasks": task_convergence,
     })
 
+
+
+
+@api.get("/api/answers")
+async def api_answers():
+    """Clean converged answers only. No dedup, no failures, no noise."""
+    answers = []
+    for tid, task in spore_state.tasks.items():
+        if not _is_real_answer(task):
+            continue
+        answers.append({
+            "task_id": tid,
+            "question": task.description,
+            "answer": task.final_answer,
+            "contributors": task.contributors(),
+            "cycles": task.my_cycles,
+            "delta_count": len(task.deltas),
+        })
+    answers.sort(key=lambda a: a["delta_count"], reverse=True)
+    return JSONResponse({"spore": SPORE_ID, "count": len(answers), "answers": answers})
 
 @api.get("/api/wall")
 async def api_wall_status():
