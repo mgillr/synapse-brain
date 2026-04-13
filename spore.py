@@ -108,6 +108,26 @@ PRIMARY_MODEL = _model_raw if not _model_raw.startswith("__") else "qwen-flash"
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(name)s] %(message)s")
 log = logging.getLogger(SPORE_ID)
 
+# --- Rate-limit backoff ---
+import random as _random
+_rate_limit_state = {"backoff_until": 0.0, "consecutive_fails": 0, "max_backoff": 300}
+
+def _check_rate_limited():
+    return time.time() < _rate_limit_state["backoff_until"]
+
+def _record_llm_success():
+    _rate_limit_state["consecutive_fails"] = 0
+    _rate_limit_state["backoff_until"] = 0.0
+
+def _record_all_providers_failed():
+    s = _rate_limit_state
+    s["consecutive_fails"] += 1
+    delay = min(30 * (2 ** (s["consecutive_fails"] - 1)), s["max_backoff"])
+    delay *= (0.8 + 0.4 * _random.random())
+    s["backoff_until"] = time.time() + delay
+    log.info("All providers rate-limited -- backing off %.0fs (attempt %d)", delay, s["consecutive_fails"])
+
+
 # ---------------------------------------------------------------------------
 # LLM model diversity
 # ---------------------------------------------------------------------------
@@ -1059,6 +1079,7 @@ async def call_llm(prompt, system="", tier="any"):
             if "429" in str(e) or "rate" in str(e).lower() or "credit" in str(e).lower():
                 _provider_cooldowns[name] = time.time() + COOLDOWN_SECONDS
 
+    _record_all_providers_failed()
     return {"text": "[all models failed]", "provider": "none", "model": "none",
             "tier": "none", "latency_ms": 0}
 
@@ -1912,7 +1933,10 @@ async def reason_on_task(task):
     # Validator and Brain roles use brain tier (Z.ai GLM-4.7-Flash)
     tier = "brain" if MY_ROLE in ("validator", "brain", "sentinel") else "worker"
     start = time.time()
-    result = await call_llm(prompt, system=system, tier=tier)
+    if _check_rate_limited():
+        result = {"text": "[rate-limited]", "provider": "backoff", "model": "none", "tokens": 0}
+    else:
+        result = await call_llm(prompt, system=system, tier=tier)
     duration = time.time() - start
 
     text = result.get("text", "")
@@ -2069,7 +2093,7 @@ Resolve contradictions favoring higher-trust contributors.
 Be specific, actionable, and complete.
 Do NOT mention the swarm, spores, trust, or reasoning process. Just deliver the answer."""
 
-    result = await call_llm(prompt, tier="brain")
+    result = {"text": "[rate-limited]", "provider": "backoff", "model": "none", "tokens": 0} if _check_rate_limited() else await call_llm(prompt, tier="brain")
     return result.get("text", "")
 
 
@@ -2112,7 +2136,7 @@ async def spontaneous_thought():
     )
 
     try:
-        result = await call_llm(prompt, tier="worker")
+        result = {"text": "[rate-limited]", "provider": "backoff", "model": "none", "tokens": 0} if _check_rate_limited() else await call_llm(prompt, tier="worker")
         text = result.get("text", "")
 
         if text and len(text.strip()) > 30 and "[all models failed]" not in text:
@@ -2156,7 +2180,7 @@ async def dream_cycle():
     prompt = dream_state.build_prompt(old_mems, new_mems, MY_ROLE)
 
     try:
-        result = await call_llm(prompt, tier="worker")
+        result = {"text": "[rate-limited]", "provider": "backoff", "model": "none", "tokens": 0} if _check_rate_limited() else await call_llm(prompt, tier="worker")
         text = result.get("text", "")
 
         if text and len(text.strip()) > 30 and "[all models failed]" not in text:
@@ -2210,7 +2234,7 @@ async def metacognitive_audit():
     prompt = metacognition.build_prompt(recent_outputs, trust_scores, trend, MY_ROLE)
 
     try:
-        result = await call_llm(prompt, tier="brain")
+        result = {"text": "[rate-limited]", "provider": "backoff", "model": "none", "tokens": 0} if _check_rate_limited() else await call_llm(prompt, tier="brain")
         text = result.get("text", "")
 
         if text and len(text.strip()) > 30 and "[all models failed]" not in text:
@@ -2892,7 +2916,7 @@ Respond ONLY with this JSON (no other text):
   "confidence": 0.0
 }}"""
 
-        result = await call_llm(prompt, tier="brain")
+        result = {"text": "[rate-limited]", "provider": "backoff", "model": "none", "tokens": 0} if _check_rate_limited() else await call_llm(prompt, tier="brain")
         text = result.get("text", "")
         # Extract JSON from response (model might wrap in markdown)
         try:
@@ -3628,7 +3652,7 @@ async def api_health():
         "spore": SPORE_ID,
         "role": MY_ROLE,
         "model": PRIMARY_MODEL,
-        "version": "6.1.0",
+        "version": "6.3.0",
         "clock": memory.clock.to_dict(),
         "memories": memory.size,
         "cycles": spore_state.reasoning_cycles,
@@ -3659,7 +3683,7 @@ async def api_cognition():
     return JSONResponse({
         "spore": SPORE_ID,
         "role": MY_ROLE,
-        "version": "6.1.0",
+        "version": "6.3.0",
         "oscillator": oscillator.stats(),
         "curiosity": {
             **curiosity.stats(),
@@ -4042,7 +4066,7 @@ if MY_ROLE == "sentinel":
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run(app, host="0.0.0.0", port=PORT)
-# v6.1.0 -- Spontaneous Cognition Engine
+# v6.3.0 -- Spontaneous Cognition Engine
 # Neural oscillation bands, free thought, dream consolidation,
 # Bayesian curiosity, metacognitive self-monitoring, emergence detection,
 # global workspace broadcast. The system thinks without being asked.

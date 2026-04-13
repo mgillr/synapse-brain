@@ -108,6 +108,26 @@ PRIMARY_MODEL = _model_raw if not _model_raw.startswith("__") else "qwen-flash"
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(name)s] %(message)s")
 log = logging.getLogger(SPORE_ID)
 
+# --- Rate-limit backoff ---
+import random as _random
+_rate_limit_state = {"backoff_until": 0.0, "consecutive_fails": 0, "max_backoff": 300}
+
+def _check_rate_limited():
+    return time.time() < _rate_limit_state["backoff_until"]
+
+def _record_llm_success():
+    _rate_limit_state["consecutive_fails"] = 0
+    _rate_limit_state["backoff_until"] = 0.0
+
+def _record_all_providers_failed():
+    s = _rate_limit_state
+    s["consecutive_fails"] += 1
+    delay = min(30 * (2 ** (s["consecutive_fails"] - 1)), s["max_backoff"])
+    delay *= (0.8 + 0.4 * _random.random())
+    s["backoff_until"] = time.time() + delay
+    log.info("All providers rate-limited -- backing off %.0fs (attempt %d)", delay, s["consecutive_fails"])
+
+
 # ---------------------------------------------------------------------------
 # LLM model diversity
 # ---------------------------------------------------------------------------
@@ -194,7 +214,7 @@ EXTERNAL_PROVIDERS = {
 
 # Rate-limit cooldown tracking
 _provider_cooldowns: dict[str, float] = {}
-COOLDOWN_SECONDS = 120  # 2 min (v6.2: faster recovery)
+COOLDOWN_SECONDS = 300
 
 FALLBACK_MODELS = [PRIMARY_MODEL] + [m for m in ALL_HF_MODELS if m != PRIMARY_MODEL]
 log.info("Primary model: %s | Role: %s", PRIMARY_MODEL, MY_ROLE)
@@ -959,7 +979,7 @@ async def call_llm(prompt, system="", tier="any"):
         if time.time() < _provider_cooldowns.get(name, 0):
             continue
         try:
-            async with httpx.AsyncClient(timeout=15.0) as client:
+            async with httpx.AsyncClient(timeout=90.0) as client:
                 start = time.time()
                 resp = await client.post(
                     conf["url"],
@@ -988,7 +1008,7 @@ async def call_llm(prompt, system="", tier="any"):
 
     # --- Phase 2: HF Router with short-circuit on 402 ---
     hf_dead = False
-    async with httpx.AsyncClient(timeout=20.0) as client:
+    async with httpx.AsyncClient(timeout=60.0) as client:
         for model in FALLBACK_MODELS:
             if hf_dead:
                 break
@@ -1037,7 +1057,7 @@ async def call_llm(prompt, system="", tier="any"):
         if time.time() < _provider_cooldowns.get(name, 0):
             continue
         try:
-            async with httpx.AsyncClient(timeout=15.0) as client:
+            async with httpx.AsyncClient(timeout=90.0) as client:
                 start = time.time()
                 resp = await client.post(
                     conf["url"],
@@ -1059,6 +1079,7 @@ async def call_llm(prompt, system="", tier="any"):
             if "429" in str(e) or "rate" in str(e).lower() or "credit" in str(e).lower():
                 _provider_cooldowns[name] = time.time() + COOLDOWN_SECONDS
 
+    _record_all_providers_failed()
     return {"text": "[all models failed]", "provider": "none", "model": "none",
             "tier": "none", "latency_ms": 0}
 
@@ -1912,7 +1933,10 @@ async def reason_on_task(task):
     # Validator and Brain roles use brain tier (Z.ai GLM-4.7-Flash)
     tier = "brain" if MY_ROLE in ("validator", "brain", "sentinel") else "worker"
     start = time.time()
-    result = await call_llm(prompt, system=system, tier=tier)
+    if _check_rate_limited():
+        result = {"text": "[rate-limited]", "provider": "backoff", "model": "none", "tokens": 0}
+    else:
+        result = await call_llm(prompt, system=system, tier=tier)
     duration = time.time() - start
 
     text = result.get("text", "")
@@ -2069,7 +2093,7 @@ Resolve contradictions favoring higher-trust contributors.
 Be specific, actionable, and complete.
 Do NOT mention the swarm, spores, trust, or reasoning process. Just deliver the answer."""
 
-    result = await call_llm(prompt, tier="brain")
+    result = {"text": "[rate-limited]", "provider": "backoff", "model": "none", "tokens": 0} if _check_rate_limited() else await call_llm(prompt, tier="brain")
     return result.get("text", "")
 
 
@@ -2112,7 +2136,7 @@ async def spontaneous_thought():
     )
 
     try:
-        result = await call_llm(prompt, tier="worker")
+        result = {"text": "[rate-limited]", "provider": "backoff", "model": "none", "tokens": 0} if _check_rate_limited() else await call_llm(prompt, tier="worker")
         text = result.get("text", "")
 
         if text and len(text.strip()) > 30 and "[all models failed]" not in text:
@@ -2156,7 +2180,7 @@ async def dream_cycle():
     prompt = dream_state.build_prompt(old_mems, new_mems, MY_ROLE)
 
     try:
-        result = await call_llm(prompt, tier="worker")
+        result = {"text": "[rate-limited]", "provider": "backoff", "model": "none", "tokens": 0} if _check_rate_limited() else await call_llm(prompt, tier="worker")
         text = result.get("text", "")
 
         if text and len(text.strip()) > 30 and "[all models failed]" not in text:
@@ -2210,7 +2234,7 @@ async def metacognitive_audit():
     prompt = metacognition.build_prompt(recent_outputs, trust_scores, trend, MY_ROLE)
 
     try:
-        result = await call_llm(prompt, tier="brain")
+        result = {"text": "[rate-limited]", "provider": "backoff", "model": "none", "tokens": 0} if _check_rate_limited() else await call_llm(prompt, tier="brain")
         text = result.get("text", "")
 
         if text and len(text.strip()) > 30 and "[all models failed]" not in text:
@@ -2282,52 +2306,57 @@ async def gossip_push():
     if dual_memory:
         collective_payload = dual_memory.collective_payload()
 
-    # PARALLEL GOSSIP -- push to all peers simultaneously
-    broadcast_item = workspace.select_broadcast()
+    async with httpx.AsyncClient(timeout=12.0, headers=HF_AUTH) as client:
+        for peer_url in PEERS:
+            try:
+                peer_key = peer_url.split("/")[-1]
+                last_seq = spore_state.peer_sequences.get(peer_key, 0)
+                mem_sync = memory.sync_payload(since_sequence=last_seq)
 
-    async def _push_one_peer(client, peer_url):
-        try:
-            peer_key = peer_url.split("/")[-1]
-            last_seq = spore_state.peer_sequences.get(peer_key, 0)
-            mem_sync = memory.sync_payload(since_sequence=last_seq)
-            payload = {
-                "from": SPORE_ID,
-                "role": MY_ROLE,
-                "model": PRIMARY_MODEL,
-                "deltas": recent_deltas,
-                "tasks": task_meta,
-                "peer_list": list(spore_state.peers_seen),
-                "memory": mem_sync,
-                "trust": trust.to_dict(),
-                "collective": collective_payload,
-            }
-            if broadcast_item:
-                payload["broadcast"] = {
-                    "content": broadcast_item["content"],
-                    "novelty": broadcast_item["novelty"],
-                    "source": broadcast_item["source"],
+                # Global Workspace: select highest-novelty insight for broadcast
+                broadcast_item = workspace.select_broadcast()
+
+                payload = {
+                    "from": SPORE_ID,
+                    "role": MY_ROLE,
+                    "model": PRIMARY_MODEL,
+                    "deltas": recent_deltas,
+                    "tasks": task_meta,
+                    "peer_list": list(spore_state.peers_seen),
+                    "memory": mem_sync,
+                    "trust": trust.to_dict(),
+                    "collective": collective_payload,
                 }
-            is_federation = (
-                federation is not None
-                and hasattr(federation, "is_multi_operator")
-                and federation.is_multi_operator
-            )
-            if is_federation:
-                peer_id_guess = peer_key.replace("synapse-spore-", "spore-")
-                peer_trust = trust.get(peer_id_guess)
-                if peer_trust < 0.3:
-                    payload["memory"] = {"records": {}, "clock": {}, "sequence": 0, "total_memories": 0}
-            resp = await client.post(f"{peer_url}/api/gossip", json=payload)
-            if resp.status_code == 200:
-                data = resp.json()
-                spore_state.peer_sequences[peer_key] = mem_sync.get("sequence", 0)
-                process_gossip_response(data)
-                log.info("Gossip -> %s OK", data.get("spore", peer_key))
-        except Exception as e:
-            log.debug("Gossip -> %s: %s", peer_url.split("/")[-1], str(e)[:60])
+                if broadcast_item:
+                    payload["broadcast"] = {
+                        "content": broadcast_item["content"],
+                        "novelty": broadcast_item["novelty"],
+                        "source": broadcast_item["source"],
+                    }
 
-    async with httpx.AsyncClient(timeout=8.0, headers=HF_AUTH) as client:
-        await asyncio.gather(*[_push_one_peer(client, p) for p in PEERS])
+                # Federation trust gating: single-operator sends everything;
+                # multi-operator gates at cross-cluster boundary
+                is_federation = (
+                    federation is not None
+                    and hasattr(federation, "is_multi_operator")
+                    and federation.is_multi_operator
+                )
+                if is_federation:
+                    peer_id_guess = peer_key.replace("synapse-spore-", "spore-")
+                    peer_trust = trust.get(peer_id_guess)
+                    if peer_trust < 0.3:
+                        payload["memory"] = {"records": {}, "clock": {}, "sequence": 0, "total_memories": 0}
+                        log.debug("Federation low-trust: limited payload to %s (%.2f)", peer_key, peer_trust)
+
+                resp = await client.post(f"{peer_url}/api/gossip", json=payload)
+                if resp.status_code == 200:
+                    data = resp.json()
+                    # Update peer's sequence cursor from our sent sequence
+                    spore_state.peer_sequences[peer_key] = mem_sync.get("sequence", 0)
+                    process_gossip_response(data)
+                    log.info("Gossip -> %s OK (delta: %d records)", data.get("spore", peer_key), len(mem_sync.get("records", {})))
+            except Exception as e:
+                log.debug("Gossip -> %s: %s", peer_url.split("/")[-1], str(e)[:60])
 
 
 def process_gossip_response(data):
@@ -2459,7 +2488,7 @@ def handle_gossip_request(data):
 # ---------------------------------------------------------------------------
 # Heartbeat loop
 # ---------------------------------------------------------------------------
-HEARTBEAT_INTERVAL = 12  # seconds (v6.2: faster cycle)
+HEARTBEAT_INTERVAL = 20  # seconds
 
 # Self-ping URL: keeps the Space awake by generating incoming traffic
 # through the public load balancer. Localhost pings do not count.
@@ -2486,7 +2515,7 @@ async def _self_ping():
     if not SELF_URL or _keepalive_counter % 6 != 0:
         return
     try:
-        async with httpx.AsyncClient(timeout=3.0, headers=HF_AUTH) as client:
+        async with httpx.AsyncClient(timeout=8.0, headers=HF_AUTH) as client:
             resp = await client.get(f"{SELF_URL}/api/health")
             if resp.status_code == 200:
                 log.debug("Keep-alive: self-ping OK")
@@ -2514,8 +2543,9 @@ async def heartbeat():
             active_bands = oscillator.tick()
 
             # GAMMA BAND -- core processing (every heartbeat)
-            # v6.2: self-ping and gossip run in parallel, not serial
-            await asyncio.gather(_self_ping(), gossip_push())
+            # This is the original v5 heartbeat, unchanged
+            await _self_ping()
+            await gossip_push()
 
             active = [
                 t for t in spore_state.tasks.values()
@@ -2541,12 +2571,11 @@ async def heartbeat():
             in_progress.sort(key=lambda t: t.my_cycles)
             scheduled = untouched + in_progress
 
-            # PARALLEL task reasoning -- process up to 3 tasks simultaneously
-            max_per_beat = 3
-
-            async def _reason_one(task):
+            max_per_beat = 5
+            for task in scheduled[:max_per_beat]:
                 try:
                     delta = await reason_on_task(task)
+                    # Track claims for emergence (these are locally generated)
                     if delta:
                         for claim in delta.get("claims", []):
                             emergence.track_claim(claim, SPORE_ID, was_gossip=False)
@@ -2555,8 +2584,6 @@ async def heartbeat():
                     spore_state.errors.append(
                         {"time": time.time(), "error": str(e), "task": task.task_id}
                     )
-
-            await asyncio.gather(*[_reason_one(t) for t in scheduled[:max_per_beat]])
 
             # ALPHA BAND -- temporal analysis + free thought (every 5th)
             if "alpha" in active_bands:
@@ -2889,7 +2916,7 @@ Respond ONLY with this JSON (no other text):
   "confidence": 0.0
 }}"""
 
-        result = await call_llm(prompt, tier="brain")
+        result = {"text": "[rate-limited]", "provider": "backoff", "model": "none", "tokens": 0} if _check_rate_limited() else await call_llm(prompt, tier="brain")
         text = result.get("text", "")
         # Extract JSON from response (model might wrap in markdown)
         try:
@@ -3625,7 +3652,7 @@ async def api_health():
         "spore": SPORE_ID,
         "role": MY_ROLE,
         "model": PRIMARY_MODEL,
-        "version": "6.2.0",
+        "version": "6.3.0",
         "clock": memory.clock.to_dict(),
         "memories": memory.size,
         "cycles": spore_state.reasoning_cycles,
@@ -3656,7 +3683,7 @@ async def api_cognition():
     return JSONResponse({
         "spore": SPORE_ID,
         "role": MY_ROLE,
-        "version": "6.2.0",
+        "version": "6.3.0",
         "oscillator": oscillator.stats(),
         "curiosity": {
             **curiosity.stats(),
@@ -4039,7 +4066,7 @@ if MY_ROLE == "sentinel":
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run(app, host="0.0.0.0", port=PORT)
-# v6.2.0 -- Spontaneous Cognition Engine
+# v6.3.0 -- Spontaneous Cognition Engine
 # Neural oscillation bands, free thought, dream consolidation,
 # Bayesian curiosity, metacognitive self-monitoring, emergence detection,
 # global workspace broadcast. The system thinks without being asked.
