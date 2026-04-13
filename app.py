@@ -3625,7 +3625,7 @@ async def api_health():
         "spore": SPORE_ID,
         "role": MY_ROLE,
         "model": PRIMARY_MODEL,
-        "version": "6.1.0",
+        "version": "6.2.0",
         "clock": memory.clock.to_dict(),
         "memories": memory.size,
         "cycles": spore_state.reasoning_cycles,
@@ -3656,7 +3656,7 @@ async def api_cognition():
     return JSONResponse({
         "spore": SPORE_ID,
         "role": MY_ROLE,
-        "version": "6.1.0",
+        "version": "6.2.0",
         "oscillator": oscillator.stats(),
         "curiosity": {
             **curiosity.stats(),
@@ -4039,7 +4039,7 @@ if MY_ROLE == "sentinel":
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run(app, host="0.0.0.0", port=PORT)
-# v6.1.0 -- Spontaneous Cognition Engine
+# v6.2.0 -- Spontaneous Cognition Engine
 # Neural oscillation bands, free thought, dream consolidation,
 # Bayesian curiosity, metacognitive self-monitoring, emergence detection,
 # global workspace broadcast. The system thinks without being asked.
