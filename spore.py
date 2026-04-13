@@ -125,7 +125,7 @@ ALL_HF_MODELS = [
 ]
 
 EXTERNAL_PROVIDERS = {
-    # --- Brain tier (strongest reasoning) ---
+    # --- Brain tier (strongest reasoning, thinking models) ---
     "zai_brain": {
         "env": "ZAI_API_KEY",
         "url": "https://api.z.ai/api/paas/v4/chat/completions",
@@ -138,31 +138,39 @@ EXTERNAL_PROVIDERS = {
         "model": "glm-4.5-flash",
         "tier": "brain",
     },
-    # --- Worker tier (high throughput) ---
-    "xai": {
-        "env": "XAI_API_KEY",
-        "url": "https://api.x.ai/v1/chat/completions",
-        "model": "grok-3-mini-fast",
-        "tier": "worker",
-    },
-    "llmapi": {
-        "env": "LLMAPI_KEY",
-        "url": "https://api.llmapi.com/chat/completions",
-        "model": "qwen-flash",
-        "tier": "worker",
-    },
-    "github_models": {
-        "env": "GITHUB_MODELS_TOKEN",
-        "url": "https://models.inference.ai.azure.com/chat/completions",
-        "model": "gpt-4o-mini",
-        "tier": "worker",
-    },
-    "openrouter": {
+    # --- Worker tier: 5 independent OpenRouter free models ---
+    # Each model has its own rate limit; spore rotation spreads load
+    "or_nemotron120b": {
         "env": "OPENROUTER_KEY",
         "url": "https://openrouter.ai/api/v1/chat/completions",
-        "model": "google/gemma-4-26b",
+        "model": "nvidia/nemotron-3-super-120b-a12b:free",
         "tier": "worker",
     },
+    "or_gptoss120b": {
+        "env": "OPENROUTER_KEY",
+        "url": "https://openrouter.ai/api/v1/chat/completions",
+        "model": "openai/gpt-oss-120b:free",
+        "tier": "worker",
+    },
+    "or_trinity": {
+        "env": "OPENROUTER_KEY",
+        "url": "https://openrouter.ai/api/v1/chat/completions",
+        "model": "arcee-ai/trinity-large-preview:free",
+        "tier": "worker",
+    },
+    "or_gemma3_4b": {
+        "env": "OPENROUTER_KEY",
+        "url": "https://openrouter.ai/api/v1/chat/completions",
+        "model": "google/gemma-3-4b-it:free",
+        "tier": "worker",
+    },
+    "or_gemma3n_4b": {
+        "env": "OPENROUTER_KEY",
+        "url": "https://openrouter.ai/api/v1/chat/completions",
+        "model": "google/gemma-3n-e4b-it:free",
+        "tier": "worker",
+    },
+    # --- Reserve tier: come online when quotas reset ---
     "google_ai": {
         "env": "GOOGLE_AI_KEY",
         "url": "https://generativelanguage.googleapis.com/v1beta/openai/chat/completions",
@@ -2975,9 +2983,6 @@ async def api_debug():
     env_check = {
         "HF_TOKEN": bool(os.environ.get("HF_TOKEN")),
         "ZAI_API_KEY": bool(os.environ.get("ZAI_API_KEY")),
-        "XAI_API_KEY": bool(os.environ.get("XAI_API_KEY")),
-        "LLMAPI_KEY": bool(os.environ.get("LLMAPI_KEY")),
-        "GITHUB_MODELS_TOKEN": bool(os.environ.get("GITHUB_MODELS_TOKEN")),
         "OPENROUTER_KEY": bool(os.environ.get("OPENROUTER_KEY")),
         "GOOGLE_AI_KEY": bool(os.environ.get("GOOGLE_AI_KEY")),
         "MY_ROLE": MY_ROLE,
