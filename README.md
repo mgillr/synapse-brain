@@ -95,8 +95,9 @@ producing. Their new reasoning flows to every node in the network, including the
 rate-limited ones.
 
 The multi-provider fallback chain on each spore tries every configured provider
-in sequence. If Z.ai is exhausted, it tries Groq. If Groq is exhausted, it
-tries Cerebras. If all external providers are down, the Sentinel's local Cortex
+in sequence. If Z.ai is exhausted, it tries OpenRouter (rotating across multiple free
+models). If OpenRouter is exhausted, it falls back to Google AI. If all
+external providers are down, the Sentinel's local Cortex
 micro-LLM (Qwen3-4B, running on-device, zero API dependency) continues
 operating. No single provider failure kills the swarm.
 
@@ -353,10 +354,8 @@ count: 3
 # Optional: API keys for more model diversity (all free tier)
 api_keys:
   zai: ""          # Z.ai -- GLM-4.7-Flash, free, most reliable
-  groq: ""         # Groq -- Llama 3.3 70B, free tier
+  openrouter: ""   # OpenRouter -- many free models, most reliable
   google_ai: ""    # Google AI Studio -- Gemini, free tier
-  cerebras: ""     # Cerebras -- fast inference, free tier
-  openrouter: ""   # OpenRouter -- many models, free tier
 
 # Optional: join an existing swarm
 peers:
@@ -437,10 +436,96 @@ do not yet have -- and what we need community help to generate -- is data from
 multiple independent operators running diverse configurations against
 measurable benchmarks.
 
+## Known Limitations
+
+This is a basic implementation. There are bugs, inconsistencies, and
+bottlenecks throughout the codebase. The architecture works and the concepts
+are sound, but the code needs hardening in almost every subsystem.
+
+Known issues we are actively aware of:
+
+- **Response latency on free-tier hosting** -- HF Spaces cpu-basic has ~4s
+  proxy latency per request. Spores are responsive but not fast. Running on
+  better hardware (Colab, VPS, local) eliminates this entirely.
+- **Trust lattice is flat** -- all peers currently score ~0.4. The quality-
+  weighted differentiation logic exists but needs tuning with real multi-
+  operator data to produce meaningful trust gradients.
+- **Gossip bandwidth at scale** -- Bloom filter sketch and MinHash/LSH dedup
+  are implemented but untested beyond 7 nodes. At 100+ nodes the gossip
+  volume may need further compression.
+- **Provider rate limit handling** -- the multi-provider fallback chain works
+  but cooldown timing is conservative. Some spores go idle when they could
+  be rotating faster.
+- **Semantic indexing** -- TF-IDF works but is not the right long-term
+  solution. A proper embedding index (FAISS or similar) would improve
+  retrieval quality significantly.
+- **No formal benchmarks** -- convergence quality, memory scaling, and trust
+  dynamics have not been rigorously measured against baselines.
+- **Single-operator data only** -- everything we know comes from one 7-node
+  deployment. Multi-operator behavior is designed for but unproven.
+
+**None of these are fundamental.** They are engineering problems that get
+solved by people using the system, finding the edges, and contributing fixes.
+If you hit a bug or bottleneck, that is valuable data -- open an issue or
+submit a PR. The goal is to evolve this together.
+
+## Running a Fast Spore
+
+HuggingFace Spaces free tier works but is slow. For a faster experience:
+
+### Google Colab (recommended for experimentation)
+
+Colab gives you a free T4 GPU, 12 GB RAM, and much faster network than HF
+free tier. Run a spore directly in a notebook:
+
+```python
+# Install deps
+!pip install -q crdt-merge>=0.9.5 fastapi uvicorn httpx numpy scikit-learn
+
+# Clone and run
+!git clone https://github.com/mgillr/synapse-brain.git
+%cd synapse-brain
+
+# Set your config
+import os
+os.environ["SPORE_ID"] = "my-colab-spore"
+os.environ["HF_TOKEN"] = "hf_your_token"
+os.environ["ZAI_API_KEY"] = "your_key"  # optional
+os.environ["OPENROUTER_KEY"] = "your_key"  # optional
+
+# Expose via ngrok (free account at ngrok.com)
+!pip install -q pyngrok
+from pyngrok import ngrok
+tunnel = ngrok.connect(7860)
+print(f"Your spore is live at: {tunnel.public_url}")
+
+# Run the spore
+!python spore.py
+```
+
+Add your Colab spore URL as a peer in any other swarm's config to join the
+network. Colab sessions last 12 hours (free) or 24 hours (Pro).
+
+### Other fast options
+
+| Platform | Speed | Cost | Notes |
+|---|---|---|---|
+| **Google Colab** | Fast | Free | T4 GPU, 12 GB RAM. Session expires after 12h. |
+| **Colab Pro** | Very fast | ~$10/mo | A100 GPU, 80 GB VRAM. Can run local 70B models. |
+| **Any VPS** (Hetzner, DigitalOcean) | Fast | $5-20/mo | Dedicated CPU, persistent. Best bang for buck. |
+| **Local machine** | Fastest | Free | No network latency. Full control. Port-forward for peers. |
+| **Railway / Render / Fly.io** | Fast | Free tier | Better than HF free tier. Standard deploy. |
+| **HF Spaces Upgrade** | Fast | $7/mo | Same platform, dedicated CPU, no shared proxy. |
+| **Bare metal GPU** | Fastest | Varies | Run local Llama 70B -- unlimited, no rate limits. |
+
+**The single biggest speed improvement is moving off HF free-tier hosting.**
+A $5/month VPS will outperform it by 10x. A local machine eliminates network
+latency entirely. Colab is the fastest free option.
+
 ## Dependencies
 
 - [crdt-merge >= 0.9.5](https://pypi.org/project/crdt-merge/) -- CRDT primitives, E4 trust lattice, Merkle provenance
-- sentence-transformers -- semantic embedding for memory retrieval
+- scikit-learn -- TF-IDF semantic indexing for memory retrieval
 - FastAPI + uvicorn -- spore HTTP server
 - httpx -- gossip mesh communication
 - numpy -- numerical operations
