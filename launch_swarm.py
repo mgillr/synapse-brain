@@ -107,9 +107,8 @@ def merge_config(args: argparse.Namespace) -> dict:
     if not cfg.get("hf_token"):
         cfg["hf_token"] = os.environ.get("HF_TOKEN", "")
     for env_key, cfg_key in [
-        ("ZAI_API_KEY", "zai"), ("XAI_API_KEY", "xai"),
-        ("GROQ_API_KEY", "groq"), ("GOOGLE_AI_KEY", "google_ai"),
-        ("CEREBRAS_API_KEY", "cerebras"), ("MISTRAL_API_KEY", "mistral"),
+        ("ZAI_API_KEY", "zai"), ("OPENROUTER_KEY", "openrouter"),
+        ("GOOGLE_AI_KEY", "google_ai"),
     ]:
         if not api_keys.get(cfg_key) and os.environ.get(env_key):
             api_keys[cfg_key] = os.environ[env_key]
@@ -359,12 +358,8 @@ def main():
     secrets = {"HF_TOKEN": token}
     key_map = {
         "zai": "ZAI_API_KEY",
-        "xai": "XAI_API_KEY",
-        "groq": "GROQ_API_KEY",
+        "openrouter": "OPENROUTER_KEY",
         "google_ai": "GOOGLE_AI_KEY",
-        "cerebras": "CEREBRAS_API_KEY",
-        "openrouter": "OPENROUTER_API_KEY",
-        "mistral": "MISTRAL_API_KEY",
     }
     for cfg_key, env_key in key_map.items():
         if api_keys.get(cfg_key):

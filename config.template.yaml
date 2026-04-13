@@ -20,27 +20,21 @@ count: 3
 private: true
 
 # LLM Provider API Keys
-# The swarm tries ALL configured providers as fallback.
+# The swarm tries ALL configured providers with automatic failover.
 # More keys = more resilient. At least one is required.
+# Provider rotation spreads load across spores to avoid rate limits.
 #
 # Free signup links:
-#   xAI:        https://console.x.ai/          (Grok models, generous free tier)
+#   Z.ai:       https://open.bigmodel.cn/       (GLM-4 thinking models, daily limit)
+#   OpenRouter: https://openrouter.ai/          (27+ free models, per-model limits)
 #   Google AI:  https://aistudio.google.com/    (Gemini 2.5 Flash, 15 req/min)
-#   GitHub:     https://github.com/marketplace/models (Llama 405B + GPT-4o-mini, free)
-#   Z.ai:       https://open.bigmodel.cn/       (GLM-4 models, free tier)
-#   OpenRouter: https://openrouter.ai/          (27+ free models)
-#   LLMAPI:     https://llmapi.ai/              (168 models, free tier)
-#   Groq:       https://console.groq.com/       (Llama 3.3 70B, 30 req/min)
-#   Cerebras:   https://cloud.cerebras.ai/      (Llama 3.3 70B, 30 req/min)
+#
+# The swarm uses multiple OpenRouter free models as separate
+# rate-limit buckets. One OpenRouter key gives you 5+ providers.
 api_keys:
-  xai: ""              # Recommended -- fast, reliable, generous
-  google_ai: ""        # Recommended -- Gemini 2.5 Flash is excellent
-  github_models: ""    # Use your GitHub PAT (no special scopes needed)
-  zai: ""              # GLM thinking models
-  openrouter: ""       # 27+ free models as fallback
-  llmapi: ""           # 168 Qwen models
-  groq: ""
-  cerebras: ""
+  zai: ""              # Primary brain tier -- GLM thinking models
+  openrouter: ""       # 5 free models with independent rate limits
+  google_ai: ""        # Reserve -- Gemini 2.5 Flash
 
 # Join an existing swarm (optional)
 # Add peer spore URLs to connect to a running swarm.
