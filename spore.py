@@ -1327,7 +1327,7 @@ class FreeThoughtEngine:
         self._last_thought = time.time()
         self._thought_count += 1
         self._insights.append({
-            "time": time.time(), "thought": thought[:500],
+            "time": time.time(), "thought": thought,
             "novelty": novelty, "id": self._thought_count,
         })
         if len(self._insights) > self._max_insights:
@@ -1392,7 +1392,7 @@ class DreamState:
         self._last_dream = time.time()
         self._dream_count += 1
         self._insights.append({
-            "time": time.time(), "insight": insight[:500],
+            "time": time.time(), "insight": insight,
             "novelty": novelty, "id": self._dream_count,
         })
         if len(self._insights) > self._max_insights:
@@ -1466,7 +1466,7 @@ class MetacognitiveAuditor:
     def record(self, result, questions):
         self._last_audit = time.time()
         self._audit_count += 1
-        self._audits.append({"time": time.time(), "result": result[:500], "id": self._audit_count})
+        self._audits.append({"time": time.time(), "result": result, "id": self._audit_count})
         self._self_questions.extend(questions)
 
     def stats(self):
@@ -1561,7 +1561,7 @@ class GlobalWorkspace:
     def nominate(self, content, novelty, source):
         """Nominate a delta for broadcast attention."""
         self._nominations.append({
-            "content": content[:500],
+            "content": content,
             "novelty": novelty,
             "source": source,
             "time": time.time(),
@@ -2048,7 +2048,7 @@ async def synthesize_task(task):
     past_insights = memory.recall(task.description, top_k=3)
     memory_block = ""
     if past_insights:
-        mem_lines = [f"  [{m.get('spore', '?')}] {m.get('content', '')[:150]}"
+        mem_lines = [f"  [{m.get('spore', '?')}] {m.get('content', '')}"
                      for m in past_insights if m.get("type") != "identity"]
         if mem_lines:
             memory_block = f"\n\nRELEVANT PAST INSIGHTS:\n" + "\n".join(mem_lines)
@@ -2305,7 +2305,7 @@ async def gossip_push():
                 }
                 if broadcast_item:
                     payload["broadcast"] = {
-                        "content": broadcast_item["content"][:500],
+                        "content": broadcast_item["content"],
                         "novelty": broadcast_item["novelty"],
                         "source": broadcast_item["source"],
                     }
@@ -2694,7 +2694,7 @@ if MY_ROLE == "sentinel":
             results = memory.recall(query, top_k)
             return {
                 "results": [{
-                    "content": r.get("content", "")[:500],
+                    "content": r.get("content", ""),
                     "similarity": r.get("similarity", 0),
                     "spore": r.get("spore", ""),
                 } for r in results],
@@ -2826,7 +2826,7 @@ if MY_ROLE == "sentinel":
             return "  (none yet -- first analysis cycle)"
         lines = []
         for pid, p in list(_sentinel.proposals.items())[-5:]:
-            lines.append(f"  [{p['status']}] {p.get('description', '')[:120]}")
+            lines.append(f"  [{p['status']}] {p.get('description', '')}")
         return "\n".join(lines)
 
     async def sentinel_five_phase_analysis(telemetry):
@@ -3962,7 +3962,7 @@ async def api_convergence():
         desc = task.description or ""
         task_convergence.append({
             "task_id": tid,
-            "description": (desc[:120] + "...") if len(desc) > 120 else desc,
+            "description": desc,
             "cycle": cycle,
             "phase": phase,
             "agreement": round(agreement, 4),

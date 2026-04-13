@@ -194,7 +194,7 @@ EXTERNAL_PROVIDERS = {
 
 # Rate-limit cooldown tracking
 _provider_cooldowns: dict[str, float] = {}
-COOLDOWN_SECONDS = 300
+COOLDOWN_SECONDS = 120  # 2 min (v6.2: faster recovery)
 
 FALLBACK_MODELS = [PRIMARY_MODEL] + [m for m in ALL_HF_MODELS if m != PRIMARY_MODEL]
 log.info("Primary model: %s | Role: %s", PRIMARY_MODEL, MY_ROLE)
@@ -959,7 +959,7 @@ async def call_llm(prompt, system="", tier="any"):
         if time.time() < _provider_cooldowns.get(name, 0):
             continue
         try:
-            async with httpx.AsyncClient(timeout=90.0) as client:
+            async with httpx.AsyncClient(timeout=15.0) as client:
                 start = time.time()
                 resp = await client.post(
                     conf["url"],
@@ -988,7 +988,7 @@ async def call_llm(prompt, system="", tier="any"):
 
     # --- Phase 2: HF Router with short-circuit on 402 ---
     hf_dead = False
-    async with httpx.AsyncClient(timeout=60.0) as client:
+    async with httpx.AsyncClient(timeout=20.0) as client:
         for model in FALLBACK_MODELS:
             if hf_dead:
                 break
@@ -1037,7 +1037,7 @@ async def call_llm(prompt, system="", tier="any"):
         if time.time() < _provider_cooldowns.get(name, 0):
             continue
         try:
-            async with httpx.AsyncClient(timeout=90.0) as client:
+            async with httpx.AsyncClient(timeout=15.0) as client:
                 start = time.time()
                 resp = await client.post(
                     conf["url"],
@@ -1327,7 +1327,7 @@ class FreeThoughtEngine:
         self._last_thought = time.time()
         self._thought_count += 1
         self._insights.append({
-            "time": time.time(), "thought": thought[:500],
+            "time": time.time(), "thought": thought,
             "novelty": novelty, "id": self._thought_count,
         })
         if len(self._insights) > self._max_insights:
@@ -1392,7 +1392,7 @@ class DreamState:
         self._last_dream = time.time()
         self._dream_count += 1
         self._insights.append({
-            "time": time.time(), "insight": insight[:500],
+            "time": time.time(), "insight": insight,
             "novelty": novelty, "id": self._dream_count,
         })
         if len(self._insights) > self._max_insights:
@@ -1466,7 +1466,7 @@ class MetacognitiveAuditor:
     def record(self, result, questions):
         self._last_audit = time.time()
         self._audit_count += 1
-        self._audits.append({"time": time.time(), "result": result[:500], "id": self._audit_count})
+        self._audits.append({"time": time.time(), "result": result, "id": self._audit_count})
         self._self_questions.extend(questions)
 
     def stats(self):
@@ -1561,7 +1561,7 @@ class GlobalWorkspace:
     def nominate(self, content, novelty, source):
         """Nominate a delta for broadcast attention."""
         self._nominations.append({
-            "content": content[:500],
+            "content": content,
             "novelty": novelty,
             "source": source,
             "time": time.time(),
@@ -2048,7 +2048,7 @@ async def synthesize_task(task):
     past_insights = memory.recall(task.description, top_k=3)
     memory_block = ""
     if past_insights:
-        mem_lines = [f"  [{m.get('spore', '?')}] {m.get('content', '')[:150]}"
+        mem_lines = [f"  [{m.get('spore', '?')}] {m.get('content', '')}"
                      for m in past_insights if m.get("type") != "identity"]
         if mem_lines:
             memory_block = f"\n\nRELEVANT PAST INSIGHTS:\n" + "\n".join(mem_lines)
@@ -2282,57 +2282,52 @@ async def gossip_push():
     if dual_memory:
         collective_payload = dual_memory.collective_payload()
 
-    async with httpx.AsyncClient(timeout=12.0, headers=HF_AUTH) as client:
-        for peer_url in PEERS:
-            try:
-                peer_key = peer_url.split("/")[-1]
-                last_seq = spore_state.peer_sequences.get(peer_key, 0)
-                mem_sync = memory.sync_payload(since_sequence=last_seq)
+    # PARALLEL GOSSIP -- push to all peers simultaneously
+    broadcast_item = workspace.select_broadcast()
 
-                # Global Workspace: select highest-novelty insight for broadcast
-                broadcast_item = workspace.select_broadcast()
-
-                payload = {
-                    "from": SPORE_ID,
-                    "role": MY_ROLE,
-                    "model": PRIMARY_MODEL,
-                    "deltas": recent_deltas,
-                    "tasks": task_meta,
-                    "peer_list": list(spore_state.peers_seen),
-                    "memory": mem_sync,
-                    "trust": trust.to_dict(),
-                    "collective": collective_payload,
+    async def _push_one_peer(client, peer_url):
+        try:
+            peer_key = peer_url.split("/")[-1]
+            last_seq = spore_state.peer_sequences.get(peer_key, 0)
+            mem_sync = memory.sync_payload(since_sequence=last_seq)
+            payload = {
+                "from": SPORE_ID,
+                "role": MY_ROLE,
+                "model": PRIMARY_MODEL,
+                "deltas": recent_deltas,
+                "tasks": task_meta,
+                "peer_list": list(spore_state.peers_seen),
+                "memory": mem_sync,
+                "trust": trust.to_dict(),
+                "collective": collective_payload,
+            }
+            if broadcast_item:
+                payload["broadcast"] = {
+                    "content": broadcast_item["content"],
+                    "novelty": broadcast_item["novelty"],
+                    "source": broadcast_item["source"],
                 }
-                if broadcast_item:
-                    payload["broadcast"] = {
-                        "content": broadcast_item["content"][:500],
-                        "novelty": broadcast_item["novelty"],
-                        "source": broadcast_item["source"],
-                    }
+            is_federation = (
+                federation is not None
+                and hasattr(federation, "is_multi_operator")
+                and federation.is_multi_operator
+            )
+            if is_federation:
+                peer_id_guess = peer_key.replace("synapse-spore-", "spore-")
+                peer_trust = trust.get(peer_id_guess)
+                if peer_trust < 0.3:
+                    payload["memory"] = {"records": {}, "clock": {}, "sequence": 0, "total_memories": 0}
+            resp = await client.post(f"{peer_url}/api/gossip", json=payload)
+            if resp.status_code == 200:
+                data = resp.json()
+                spore_state.peer_sequences[peer_key] = mem_sync.get("sequence", 0)
+                process_gossip_response(data)
+                log.info("Gossip -> %s OK", data.get("spore", peer_key))
+        except Exception as e:
+            log.debug("Gossip -> %s: %s", peer_url.split("/")[-1], str(e)[:60])
 
-                # Federation trust gating: single-operator sends everything;
-                # multi-operator gates at cross-cluster boundary
-                is_federation = (
-                    federation is not None
-                    and hasattr(federation, "is_multi_operator")
-                    and federation.is_multi_operator
-                )
-                if is_federation:
-                    peer_id_guess = peer_key.replace("synapse-spore-", "spore-")
-                    peer_trust = trust.get(peer_id_guess)
-                    if peer_trust < 0.3:
-                        payload["memory"] = {"records": {}, "clock": {}, "sequence": 0, "total_memories": 0}
-                        log.debug("Federation low-trust: limited payload to %s (%.2f)", peer_key, peer_trust)
-
-                resp = await client.post(f"{peer_url}/api/gossip", json=payload)
-                if resp.status_code == 200:
-                    data = resp.json()
-                    # Update peer's sequence cursor from our sent sequence
-                    spore_state.peer_sequences[peer_key] = mem_sync.get("sequence", 0)
-                    process_gossip_response(data)
-                    log.info("Gossip -> %s OK (delta: %d records)", data.get("spore", peer_key), len(mem_sync.get("records", {})))
-            except Exception as e:
-                log.debug("Gossip -> %s: %s", peer_url.split("/")[-1], str(e)[:60])
+    async with httpx.AsyncClient(timeout=8.0, headers=HF_AUTH) as client:
+        await asyncio.gather(*[_push_one_peer(client, p) for p in PEERS])
 
 
 def process_gossip_response(data):
@@ -2464,7 +2459,7 @@ def handle_gossip_request(data):
 # ---------------------------------------------------------------------------
 # Heartbeat loop
 # ---------------------------------------------------------------------------
-HEARTBEAT_INTERVAL = 20  # seconds
+HEARTBEAT_INTERVAL = 12  # seconds (v6.2: faster cycle)
 
 # Self-ping URL: keeps the Space awake by generating incoming traffic
 # through the public load balancer. Localhost pings do not count.
@@ -2491,7 +2486,7 @@ async def _self_ping():
     if not SELF_URL or _keepalive_counter % 6 != 0:
         return
     try:
-        async with httpx.AsyncClient(timeout=8.0, headers=HF_AUTH) as client:
+        async with httpx.AsyncClient(timeout=3.0, headers=HF_AUTH) as client:
             resp = await client.get(f"{SELF_URL}/api/health")
             if resp.status_code == 200:
                 log.debug("Keep-alive: self-ping OK")
@@ -2519,9 +2514,8 @@ async def heartbeat():
             active_bands = oscillator.tick()
 
             # GAMMA BAND -- core processing (every heartbeat)
-            # This is the original v5 heartbeat, unchanged
-            await _self_ping()
-            await gossip_push()
+            # v6.2: self-ping and gossip run in parallel, not serial
+            await asyncio.gather(_self_ping(), gossip_push())
 
             active = [
                 t for t in spore_state.tasks.values()
@@ -2547,11 +2541,12 @@ async def heartbeat():
             in_progress.sort(key=lambda t: t.my_cycles)
             scheduled = untouched + in_progress
 
-            max_per_beat = 5
-            for task in scheduled[:max_per_beat]:
+            # PARALLEL task reasoning -- process up to 3 tasks simultaneously
+            max_per_beat = 3
+
+            async def _reason_one(task):
                 try:
                     delta = await reason_on_task(task)
-                    # Track claims for emergence (these are locally generated)
                     if delta:
                         for claim in delta.get("claims", []):
                             emergence.track_claim(claim, SPORE_ID, was_gossip=False)
@@ -2560,6 +2555,8 @@ async def heartbeat():
                     spore_state.errors.append(
                         {"time": time.time(), "error": str(e), "task": task.task_id}
                     )
+
+            await asyncio.gather(*[_reason_one(t) for t in scheduled[:max_per_beat]])
 
             # ALPHA BAND -- temporal analysis + free thought (every 5th)
             if "alpha" in active_bands:
@@ -2694,7 +2691,7 @@ if MY_ROLE == "sentinel":
             results = memory.recall(query, top_k)
             return {
                 "results": [{
-                    "content": r.get("content", "")[:500],
+                    "content": r.get("content", ""),
                     "similarity": r.get("similarity", 0),
                     "spore": r.get("spore", ""),
                 } for r in results],
@@ -2826,7 +2823,7 @@ if MY_ROLE == "sentinel":
             return "  (none yet -- first analysis cycle)"
         lines = []
         for pid, p in list(_sentinel.proposals.items())[-5:]:
-            lines.append(f"  [{p['status']}] {p.get('description', '')[:120]}")
+            lines.append(f"  [{p['status']}] {p.get('description', '')}")
         return "\n".join(lines)
 
     async def sentinel_five_phase_analysis(telemetry):
@@ -3962,7 +3959,7 @@ async def api_convergence():
         desc = task.description or ""
         task_convergence.append({
             "task_id": tid,
-            "description": (desc[:120] + "...") if len(desc) > 120 else desc,
+            "description": desc,
             "cycle": cycle,
             "phase": phase,
             "agreement": round(agreement, 4),
