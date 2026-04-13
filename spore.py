@@ -109,6 +109,8 @@ THINKING_MODELS = {
     "Qwen/QwQ-32B",
     "glm-4.5-flash",
     "glm-4.7-flash",
+    "grok-3-mini",
+    "grok-3-mini-fast",
 }
 
 ALL_HF_MODELS = [
@@ -123,6 +125,7 @@ ALL_HF_MODELS = [
 ]
 
 EXTERNAL_PROVIDERS = {
+    # --- Brain tier (strongest reasoning) ---
     "zai_brain": {
         "env": "ZAI_API_KEY",
         "url": "https://api.z.ai/api/paas/v4/chat/completions",
@@ -135,28 +138,35 @@ EXTERNAL_PROVIDERS = {
         "model": "glm-4.5-flash",
         "tier": "brain",
     },
-    "groq": {
-        "env": "GROQ_API_KEY",
-        "url": "https://api.groq.com/openai/v1/chat/completions",
-        "model": "llama-3.3-70b-versatile",
+    # --- Worker tier (high throughput) ---
+    "xai": {
+        "env": "XAI_API_KEY",
+        "url": "https://api.x.ai/v1/chat/completions",
+        "model": "grok-3-mini-fast",
         "tier": "worker",
     },
-    "cerebras": {
-        "env": "CEREBRAS_API_KEY",
-        "url": "https://api.cerebras.ai/v1/chat/completions",
-        "model": "llama3.3-70b",
+    "llmapi": {
+        "env": "LLMAPI_KEY",
+        "url": "https://api.llmapi.com/chat/completions",
+        "model": "qwen-flash",
+        "tier": "worker",
+    },
+    "github_models": {
+        "env": "GITHUB_MODELS_TOKEN",
+        "url": "https://models.inference.ai.azure.com/chat/completions",
+        "model": "gpt-4o-mini",
+        "tier": "worker",
+    },
+    "openrouter": {
+        "env": "OPENROUTER_KEY",
+        "url": "https://openrouter.ai/api/v1/chat/completions",
+        "model": "google/gemma-4-26b",
         "tier": "worker",
     },
     "google_ai": {
         "env": "GOOGLE_AI_KEY",
         "url": "https://generativelanguage.googleapis.com/v1beta/openai/chat/completions",
-        "model": "gemini-2.0-flash",
-        "tier": "worker",
-    },
-    "openrouter": {
-        "env": "OPENROUTER_API_KEY",
-        "url": "https://openrouter.ai/api/v1/chat/completions",
-        "model": "google/gemini-2.0-flash-exp:free",
+        "model": "gemini-2.5-flash",
         "tier": "worker",
     },
 }
@@ -908,18 +918,17 @@ async def call_llm(prompt, system="", tier="any"):
     messages.append({"role": "user", "content": prompt})
 
     # --- Phase 1: External providers (ordered by tier preference) ---
+    # Provider rotation: each spore starts at a different offset in the worker
+    # chain to spread load across providers and avoid simultaneous rate limits
+    brain_providers = [(n, c) for n, c in EXTERNAL_PROVIDERS.items() if c.get("tier") == "brain"]
+    worker_providers = [(n, c) for n, c in EXTERNAL_PROVIDERS.items() if c.get("tier") == "worker"]
+    if worker_providers:
+        offset = SPORE_INDEX % len(worker_providers)
+        worker_providers = worker_providers[offset:] + worker_providers[:offset]
     if tier == "brain":
-        # Brain: Z.ai first, then all workers
-        ext_order = (
-            [(n, c) for n, c in EXTERNAL_PROVIDERS.items() if c.get("tier") == "brain"]
-            + [(n, c) for n, c in EXTERNAL_PROVIDERS.items() if c.get("tier") == "worker"]
-        )
+        ext_order = brain_providers + worker_providers
     else:
-        # Worker: all workers first, then brain (Z.ai) as fallback
-        ext_order = (
-            [(n, c) for n, c in EXTERNAL_PROVIDERS.items() if c.get("tier") == "worker"]
-            + [(n, c) for n, c in EXTERNAL_PROVIDERS.items() if c.get("tier") == "brain"]
-        )
+        ext_order = worker_providers + brain_providers
 
     for name, conf in ext_order:
         key = os.environ.get(conf.get("env", ""))
@@ -2966,8 +2975,11 @@ async def api_debug():
     env_check = {
         "HF_TOKEN": bool(os.environ.get("HF_TOKEN")),
         "ZAI_API_KEY": bool(os.environ.get("ZAI_API_KEY")),
-        "GROQ_API_KEY": bool(os.environ.get("GROQ_API_KEY")),
-        "CEREBRAS_API_KEY": bool(os.environ.get("CEREBRAS_API_KEY")),
+        "XAI_API_KEY": bool(os.environ.get("XAI_API_KEY")),
+        "LLMAPI_KEY": bool(os.environ.get("LLMAPI_KEY")),
+        "GITHUB_MODELS_TOKEN": bool(os.environ.get("GITHUB_MODELS_TOKEN")),
+        "OPENROUTER_KEY": bool(os.environ.get("OPENROUTER_KEY")),
+        "GOOGLE_AI_KEY": bool(os.environ.get("GOOGLE_AI_KEY")),
         "MY_ROLE": MY_ROLE,
         "PRIMARY_MODEL": PRIMARY_MODEL,
         "SPORE_ID": SPORE_ID,
