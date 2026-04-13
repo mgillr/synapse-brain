@@ -1,0 +1,6 @@
+{
+  "_comment": "Synapse Brain v7 global network seed nodes. Any swarm that launches from this repo will auto-join these nodes and share reasoning across all clusters. Add your spore endpoints here via PR after deploying.",
+  "version": "7.0.0",
+  "dna": "synapse-brain",
+  "seeds": []
+}

@@ -1,6 +1,7 @@
-# Synapse Brain Swarm Configuration
+# Synapse Brain v7 Swarm Configuration
 # Copy to config.yaml and fill in your values.
 # Minimum: hf_token + at least one LLM provider key.
+# Keys stay local -- never committed to git (.gitignore covers config.yaml)
 
 # HuggingFace token (required -- free account works)
 # Get one at: https://huggingface.co/settings/tokens
@@ -26,15 +27,23 @@ private: true
 #
 # Free signup links:
 #   Z.ai:       https://open.bigmodel.cn/       (GLM-4 thinking models, daily limit)
+#   xAI Grok:   https://console.x.ai/           (Grok-3-mini, thinking model, fast)
 #   OpenRouter: https://openrouter.ai/          (27+ free models, per-model limits)
 #   Google AI:  https://aistudio.google.com/    (Gemini 2.5 Flash, 15 req/min)
+#   LLM API:    https://llmapi.com/             (Llama-4-Maverick, worker tier)
 #
 # The swarm uses multiple OpenRouter free models as separate
 # rate-limit buckets. One OpenRouter key gives you 5+ providers.
 api_keys:
   zai: ""              # Primary brain tier -- GLM thinking models
+  xai: ""              # xAI Grok-3-mini brain tier (thinking model)
   openrouter: ""       # 5 free models with independent rate limits
   google_ai: ""        # Reserve -- Gemini 2.5 Flash
+  llmapi: ""           # LLM API -- Llama-4-Maverick worker tier
+
+# Command Center (optional)
+# deploy_cc: true         # Deploy a CC Space automatically
+# cc_name: "synapse-cc"  # CC Space name
 
 # Join an existing swarm (optional)
 # Add peer spore URLs to connect to a running swarm.

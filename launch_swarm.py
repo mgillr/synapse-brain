@@ -51,11 +51,16 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--private", action="store_true", default=None)
     p.add_argument("--public", action="store_true")
     p.add_argument("--zai-key", type=str, help="Z.ai API key")
+    p.add_argument("--xai-key", type=str, help="xAI Grok API key")
+    p.add_argument("--llmapi-key", type=str, help="LLM API key")
+    p.add_argument("--openrouter-key", type=str, help="OpenRouter API key")
     p.add_argument("--groq-key", type=str, help="Groq API key")
     p.add_argument("--google-key", type=str, help="Google AI Studio key")
     p.add_argument("--cerebras-key", type=str, help="Cerebras API key")
     p.add_argument("--mistral-key", type=str, help="Mistral API key")
     p.add_argument("--peers", type=str, nargs="*", help="Peer URLs to join")
+    p.add_argument("--deploy-cc", action="store_true", help="Also deploy a Command Center Space")
+    p.add_argument("--cc-name", type=str, default="synapse-cc", help="CC Space name")
     p.add_argument("--dry-run", action="store_true")
     return p.parse_args()
 
@@ -93,6 +98,12 @@ def merge_config(args: argparse.Namespace) -> dict:
     api_keys = cfg.get("api_keys", {})
     if args.zai_key:
         api_keys["zai"] = args.zai_key
+    if args.xai_key:
+        api_keys["xai"] = args.xai_key
+    if args.llmapi_key:
+        api_keys["llmapi"] = args.llmapi_key
+    if getattr(args, "openrouter_key", None):
+        api_keys["openrouter"] = args.openrouter_key
     if args.groq_key:
         api_keys["groq"] = args.groq_key
     if args.google_key:
@@ -103,12 +114,19 @@ def merge_config(args: argparse.Namespace) -> dict:
         api_keys["mistral"] = args.mistral_key
     cfg["api_keys"] = api_keys
 
+    # CC deploy flags from CLI
+    if getattr(args, "deploy_cc", False):
+        cfg["deploy_cc"] = True
+    if getattr(args, "cc_name", None):
+        cfg["cc_name"] = args.cc_name
+
     # Environment fallbacks
     if not cfg.get("hf_token"):
         cfg["hf_token"] = os.environ.get("HF_TOKEN", "")
     for env_key, cfg_key in [
         ("ZAI_API_KEY", "zai"), ("OPENROUTER_KEY", "openrouter"),
-        ("GOOGLE_AI_KEY", "google_ai"),
+        ("GOOGLE_AI_KEY", "google_ai"), ("XAI_API_KEY", "xai"),
+        ("LLMAPI_KEY", "llmapi"),
     ]:
         if not api_keys.get(cfg_key) and os.environ.get(env_key):
             api_keys[cfg_key] = os.environ[env_key]
@@ -320,6 +338,80 @@ def push_space_files(owner: str, name: str, token: str, files: dict[str, str]):
         print(f"  Warning: {e}")
 
 
+def deploy_command_center(owner: str, cc_name: str, token: str, spore_urls: list[str],
+                          secrets: dict[str, str], private: bool, dry_run: bool):
+    """Deploy the Command Center Space that monitors ALL spores in the network.
+
+    The CC fetches /api/health from every spore it knows about and renders a
+    unified dashboard. It shows analytics from all clusters — yours and every
+    operator who joined the global bootstrap network.
+    """
+    cc_dir = Path(__file__).parent / "command-center"
+    if not cc_dir.exists():
+        print(f"  Warning: command-center/ directory not found — skipping CC deploy")
+        return
+
+    core_spores_js = json.dumps(spore_urls, indent=2)
+    # Read CC app.py and inject known spores
+    cc_app = (cc_dir / "app.py").read_text() if (cc_dir / "app.py").exists() else ""
+    if "CORE_SPORES" in cc_app:
+        cc_app = cc_app.replace(
+            "CORE_SPORES = []",
+            f"CORE_SPORES = {core_spores_js}",
+        )
+
+    cc_files: dict[str, str] = {}
+    for f in cc_dir.iterdir():
+        if f.is_file():
+            try:
+                cc_files[f.name] = f.read_text()
+            except Exception:
+                pass
+    if cc_app:
+        cc_files["app.py"] = cc_app
+
+    # Add bootstrap URL so the CC also discovers cross-cluster spores
+    bootstrap_url = "https://raw.githubusercontent.com/mgillr/synapse-brain/main/bootstrap.json"
+    if "BOOTSTRAP_URL" not in cc_files.get("app.py", ""):
+        cc_files["app.py"] = f'BOOTSTRAP_URL = "{bootstrap_url}"\n' + cc_files.get("app.py", "")
+
+    cc_readme = (
+        "---\n"
+        "title: Synapse Command Center\n"
+        'emoji: "🧠"\n'
+        "colorFrom: blue\n"
+        "colorTo: purple\n"
+        "sdk: gradio\n"
+        'sdk_version: "5.25.2"\n'
+        "app_file: app.py\n"
+        "pinned: false\n"
+        "---\n\n"
+        "Synapse Brain Command Center — global swarm analytics dashboard.\n"
+        "Shows ALL connected spores across all clusters in the bootstrap network.\n"
+    )
+    cc_files["README.md"] = cc_readme
+
+    print(f"[CC] Deploying command center: {owner}/{cc_name}")
+    if dry_run:
+        outdir = Path(f"/tmp/swarm-staging/{cc_name}")
+        outdir.mkdir(parents=True, exist_ok=True)
+        for fname, content in cc_files.items():
+            (outdir / fname).write_text(content)
+        print(f"  Staged at {outdir}")
+        return
+
+    create_space_repo(owner, cc_name, token, private=private)
+    time.sleep(1)
+    cc_secrets = dict(secrets)
+    cc_secrets["SYNAPSE_SPORES"] = json.dumps(spore_urls)
+    cc_secrets["BOOTSTRAP_URL"] = bootstrap_url
+    set_space_secrets(owner, cc_name, token, cc_secrets)
+    time.sleep(0.5)
+    push_space_files(owner, cc_name, token, cc_files)
+    print(f"  Live: https://huggingface.co/spaces/{owner}/{cc_name}")
+    print()
+
+
 def main():
     args = parse_args()
     cfg = merge_config(args)
@@ -360,6 +452,11 @@ def main():
         "zai": "ZAI_API_KEY",
         "openrouter": "OPENROUTER_KEY",
         "google_ai": "GOOGLE_AI_KEY",
+        "xai": "XAI_API_KEY",
+        "llmapi": "LLMAPI_KEY",
+        "groq": "GROQ_API_KEY",
+        "cerebras": "CEREBRAS_API_KEY",
+        "mistral": "MISTRAL_API_KEY",
     }
     for cfg_key, env_key in key_map.items():
         if api_keys.get(cfg_key):
@@ -419,6 +516,25 @@ def main():
         print()
         print("No API keys set. All reasoning uses free-tier providers.")
         print("Add keys to config.yaml for faster, more reliable responses.")
+
+    # Deploy Command Center if requested
+    if cfg.get("deploy_cc"):
+        print()
+        cc_name = cfg.get("cc_name", "synapse-cc")
+        deploy_command_center(
+            owner=owner,
+            cc_name=cc_name,
+            token=token,
+            spore_urls=space_urls,
+            secrets=secrets,
+            private=private,
+            dry_run=cfg.get("dry_run", False),
+        )
+        print(f"CC URL: https://{owner.lower()}-{cc_name}.hf.space")
+
+    print()
+    print("Global network: your spores will auto-join the Synapse bootstrap network")
+    print("and share reasoning with all other deployed clusters worldwide.")
 
 
 if __name__ == "__main__":

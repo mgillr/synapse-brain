@@ -1,14 +1,35 @@
-# Synapse Brain
+# Synapse Brain v7 — Quantum-SCE Unified Collective Intelligence
 
-A distributed reasoning swarm where every node makes every other node smarter.
+A distributed reasoning swarm where every node makes every other node smarter —
+and every new clone automatically joins the global network.
 
 ```bash
 git clone https://github.com/mgillr/synapse-brain.git
 cd synapse-brain
-./deploy.sh
+python launch_swarm.py --config config.yaml --deploy-cc
 ```
 
-One command. Your swarm is live.
+One command. Your swarm is live and connected to the global network.
+
+## What's New in v7
+
+**Quantum Layer** — six quantum-inspired mechanisms woven into every spore:
+
+| Mechanism | What it does |
+|---|---|
+| **Quantum Annealing** | Cosine temperature schedule — hot exploration early, cool synthesis late |
+| **Superposition** | Maintains parallel weighted hypotheses; collapses at synthesis |
+| **Interference** | Amplifies aligned contributions, attenuates isolated claims (CRDT preserved) |
+| **Quantum Tunneling** | Probabilistic escape from premature convergence |
+| **Entanglement** | Correlated trust pairs — positive trust updates propagate to partners |
+| **Decoherence** | exp(-λ×age) relevance decay; memories never deleted |
+
+**Auto-Discovery Bootstrap** — every new deployment automatically joins the
+global network. No manual config required. Your CC shows analytics from ALL
+connected spores across ALL clusters, not just your own.
+
+**Full Providers** — xAI Grok, LLM API, OpenRouter (5 free models), Z.ai,
+Google AI. Every spore tries every configured provider. Reasoning never stops.
 
 ## Why This Exists
 
@@ -182,10 +203,37 @@ pip install -r requirements.txt
 python spore.py  # single spore, local mode
 ```
 
-## Join an Existing Swarm
+## Auto-Discovery: Zero-Config Global Network
 
-Add peer URLs to your config. Your spores discover and gossip with the
-network automatically. You gain their memories. They gain yours.
+**v7 spores auto-join the global network on startup.** No peer config needed.
+
+Every spore fetches `bootstrap.json` from this repo at launch and federation-joins
+all known seed nodes. Your CC shows analytics from every connected cluster in
+the world — yours and everyone else's.
+
+```
+Your clone starts → fetches bootstrap.json → joins global seeds
+                                           → global seeds know about you
+                                           → gossip begins
+                                           → your CC sees all clusters
+```
+
+To add your spores to the global seed list, open a PR updating `bootstrap.json`:
+
+```json
+{
+  "seeds": [
+    "https://your-username-synapse-spore-000.hf.space",
+    "https://your-username-synapse-spore-001.hf.space"
+  ]
+}
+```
+
+Once merged, every future deployment worldwide will auto-discover your nodes.
+
+## Join an Existing Swarm (Manual)
+
+If you want to connect to a specific private swarm, add peer URLs to config:
 
 ```yaml
 # config.yaml
@@ -194,7 +242,7 @@ peers:
   - "https://their-org-synapse-spore-001.hf.space"
 ```
 
-That is the entire federation setup. Two lines of config.
+That is the entire manual federation setup. Two lines of config.
 
 The peer list bootstraps discovery. Once connected, your spores learn about
 other peers through gossip and build the full mesh organically. You do not
@@ -202,10 +250,11 @@ need to list every node in the network -- just one or two entry points.
 
 ## Command Center
 
-Every commander gets a monitoring dashboard:
+Every operator gets a monitoring dashboard that shows their spores AND all
+connected spores across the global network:
 
 ```bash
-python launch_swarm.py --config config.yaml --command-center
+python launch_swarm.py --config config.yaml --deploy-cc
 ```
 
 The Command Center gives you:
@@ -214,42 +263,70 @@ The Command Center gives you:
 - **Sentinel** -- autonomous improvement proposals and deployment log
 - **Globe Map** -- geographic visualization of your swarm topology
 - **Analytics** -- memory growth, gossip rates, trust distribution, capacity metrics
+- **Quantum** -- annealing temperature, tunneling events, entanglement pairs, decoherence
+- **Network** -- live view of ALL cross-cluster spores from the bootstrap network
 
-The Command Center reads from your spores. It has no write access to the mesh
-and cannot modify swarm behavior. Safe to run, safe to share.
+The Command Center reads from your spores and from any bootstrap network node
+that responds to `/api/health`. It has no write access. Safe to run, safe to share.
 
 ## Architecture
 
 ```
-             Command Center (monitoring + analytics)
-                        |
-     +--------+---------+---------+---------+--------+---------+
-     |        |         |         |         |        |         |
- Spore-0  Spore-1   Spore-2  Spore-3   Spore-4  Spore-5  Spore-6
- Explorer Synth.    Advers.  Validator  General. Brain    Sentinel
-     |        |         |         |         |        |         |
-     +--------+---------+---------+---------+--------+---------+
-                     Gossip Mesh (HTTP + auth)
-                            |
-                     CRDT Memory Layer
-                     (crdt-merge >= 0.9.5)
-                     OR-Set + MerkleDAG
-                     + E4 Trust Lattice
+     bootstrap.json (GitHub) ← all deployed clusters register here
+               |
+               | auto-discover on startup
+               v
+    Your CC ──────────────── Their CC ──────────────── Another CC
+       |                         |                          |
+  Your cluster              Their cluster             Another cluster
+  (7 spores)                (N spores)                (N spores)
+       |                         |                          |
+       +─────────────────────────+──────────────────────────+
+                        Cross-cluster gossip mesh
+                        (federation/join + gossip_push)
+                                 |
+                         CRDT Memory Layer
+                         (crdt-merge >= 0.9.5)
+                         OR-Set + MerkleDAG + E4 Trust Lattice
+                                 |
+                         Quantum Layer (v7)
+                         Annealing · Superposition · Interference
+                         Tunneling · Entanglement · Decoherence
+                                 |
+                    SCE — Spontaneous Cognition Engine (v6)
+                    NeuralOscillator · DMN · HippocampalReplay
+                    Curiosity · MetacognitiveAuditor · Emergence
+                    GlobalWorkspace
 ```
 
 Each spore runs a different LLM family. They reason independently, share
 discoveries via gossip, build trust organically through interaction quality,
 and converge on synthesized answers that no single model produces alone.
+The quantum layer adds probabilistic phase control and semantic interference.
+The SCE adds spontaneous thought, dreaming, and metacognitive self-monitoring.
 
 ### Core Components
 
 - **CRDT Memory (OR-Set)** -- add-wins semantics, nothing ever deleted, gossip propagates everything to all peers
-- **Semantic Sliding Window** -- continuous background indexing via sentence-transformers, O(1) similarity retrieval regardless of memory size
-- **E4 Trust Lattice** -- recursive trust scoring from [crdt-merge](https://github.com/mgillr/crdt-merge), quality-weighted synthesis, higher-trust peers have more influence on converged answers
-- **Knowledge Wall** -- privacy boundary, raw input never enters gossip, only distilled insights cross, HMAC-bound provenance
-- **Cortex** -- local micro-LLM (Qwen3-4B) on Sentinel spore for autonomous code review and fast pattern recognition without external API calls
-- **MCP Server** -- every spore exposes 7 tools via Model Context Protocol for external integration
-- **Federation Protocol** -- Swarm DNA integrity verification, any crdt-merge node can join, modified nodes are rejected
+- **Quantum Annealing** -- cosine temperature schedule drives exploration→synthesis phase transitions
+- **Superposition** -- parallel weighted hypotheses; wave-function collapse at synthesis
+- **Quantum Tunneling** -- stochastic escape from premature convergence (P ∝ convergence × low-confidence)
+- **Entanglement** -- correlated trust pairs; positive trust propagates to entangled partners
+- **Decoherence** -- exp(-λ×age) relevance decay; CRDT add-wins intact, nothing deleted
+- **Neural Oscillator** -- gamma/beta/alpha/theta/delta cognitive processing bands
+- **Default Mode Network** -- spontaneous free thought during idle states
+- **Hippocampal Dream Replay** -- cross-temporal memory consolidation
+- **Bayesian Curiosity** -- dopaminergic surprise signal drives information-seeking
+- **MetacognitiveAuditor** -- prefrontal self-monitoring, self-directed questions
+- **EmergenceDetector** -- tracks when collective discovers what no individual was told
+- **GlobalWorkspace** -- attention broadcast for breakthrough insights (Baars' GWT)
+- **Semantic Sliding Window** -- TF-IDF O(1) retrieval regardless of memory size
+- **E4 Trust Lattice** -- recursive trust scoring, quality-weighted synthesis
+- **Knowledge Wall** -- privacy boundary, raw input never enters gossip
+- **Cortex** -- local micro-LLM (Qwen3-4B) on Sentinel for offline operation
+- **MCP Server** -- every spore exposes 7 tools via Model Context Protocol
+- **Federation Protocol** -- Swarm DNA integrity verification, cross-cluster join
+- **Bootstrap Auto-Discovery** -- fetches seed list from GitHub on startup
 
 ## What We Are Trying to Prove
 

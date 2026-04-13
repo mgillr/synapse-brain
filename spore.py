@@ -1,4 +1,4 @@
-"""Synapse Brain Spore v6 -- Spontaneous Cognition Engine.
+"""Synapse Brain Spore v7 -- Quantum-SCE Unified Cognitive Engine.
 
 Architecture:
   - crdt-merge ORSet: persistent memory (add-wins, nothing ever forgotten)
@@ -21,6 +21,18 @@ Architecture:
   - Emergence Detector: tracks when the collective discovers what no individual was told
   - Global Workspace: attention broadcast for breakthrough insights (Baars' GWT)
 
+  v7 -- Quantum Layer (unified with SCE):
+  - Quantum Annealing: cosine temperature schedule drives exploration→synthesis
+  - Superposition: parallel weighted hypotheses; wave-function collapse at synthesis
+  - Constructive/Destructive Interference: TF-IDF alignment amplifies/attenuates contributions
+  - Quantum Tunneling: probabilistic phase escape prevents premature convergence
+  - Entanglement: correlated trust pairs; positive updates propagate to partners
+  - Decoherence: exp(-λ×age) relevance decay; CRDT add-wins preserved always
+
+  Bootstrap Federation: on startup each spore fetches bootstrap.json from GitHub
+  and federation-joins all seed nodes, so clones automatically join the global
+  network. CC shows analytics from ALL connected spores across all clusters.
+
 Every spore has the COMPLETE cognitive protocol. Role is a LENS, not a limitation.
 Memory is permanent -- nothing is ever lost. ORSet add-wins semantics + gossip
 ensure every spore eventually has every insight from every peer.
@@ -33,6 +45,7 @@ import asyncio
 import hashlib
 import json
 import logging
+import math
 import os
 import re
 import atexit
@@ -201,6 +214,26 @@ EXTERNAL_PROVIDERS = {
         "env": "OPENROUTER_KEY",
         "url": "https://openrouter.ai/api/v1/chat/completions",
         "model": "google/gemma-3n-e4b-it:free",
+        "tier": "worker",
+    },
+    # --- xAI Grok (thinking model, brain tier) ---
+    "xai_grok_fast": {
+        "env": "XAI_API_KEY",
+        "url": "https://api.x.ai/v1/chat/completions",
+        "model": "grok-3-mini-fast",
+        "tier": "brain",
+    },
+    "xai_grok": {
+        "env": "XAI_API_KEY",
+        "url": "https://api.x.ai/v1/chat/completions",
+        "model": "grok-3-mini",
+        "tier": "brain",
+    },
+    # --- LLM API (worker tier, additional model diversity) ---
+    "llmapi_worker": {
+        "env": "LLMAPI_KEY",
+        "url": "https://llmapi.com/api/chat/completions",
+        "model": "meta-llama/Llama-4-Maverick-17B-128E-Instruct-FP8",
         "tier": "worker",
     },
     # --- Reserve tier: come online when quotas reset ---
@@ -493,6 +526,8 @@ class CRDTMemory:
         os.makedirs(self._wal_dir, exist_ok=True)
         self._wal_path = os.path.join(self._wal_dir, f"memory_{spore_id}.wal")
         self._wal_file = None
+        # Decoherence index — must be created before WAL replay
+        self._decoherence = DecoherenceIndex()
         self._replay_wal()
 
     # --- WAL persistence ---
@@ -548,6 +583,10 @@ class CRDTMemory:
         self._sequence += 1
         self._key_sequence[key] = self._sequence
         self._needs_refit = True
+        # Decoherence: restored memories start with their original timestamp
+        # so they naturally reflect true age since last reinforcement
+        self._decoherence.register(key)
+        self._decoherence._last_reinforced[key] = ts  # use original store time
 
     # --- Semantic dedup ---
 
@@ -614,6 +653,8 @@ class CRDTMemory:
             self._key_sequence[key] = self._sequence
             self._needs_refit = True
 
+        # Decoherence: register new memory at full strength
+        self._decoherence.register(key)
         return key
 
     def recall(self, query, top_k=5, trust_store=None):
@@ -662,6 +703,12 @@ class CRDTMemory:
                             src_trust = trust_store.get(src) if src else 0.5
                             sims[idx] = 0.7 * sims[idx] + 0.3 * src_trust
 
+                # Decoherence: apply decay factor to similarity scores.
+                # Old, un-reinforced memories score lower but are never removed.
+                for idx in range(len(sims)):
+                    key = self._corpus_keys[idx]
+                    sims[idx] *= self._decoherence.factor(key)
+
                 top_idx = sims.argsort()[-top_k:][::-1]
                 results = []
                 for idx in top_idx:
@@ -669,6 +716,8 @@ class CRDTMemory:
                         key = self._corpus_keys[idx]
                         rec = self.index.get_record(key)
                         if rec:
+                            # Reinforce accessed memory (resets decoherence clock)
+                            self._decoherence.reinforce(key)
                             results.append(
                                 {"key": key, "similarity": float(sims[idx]), **rec}
                             )
@@ -922,6 +971,292 @@ class SemanticConvergence:
         return (recent[-1] - recent[0]) / window
 
 
+# ===========================================================================
+# QUANTUM LAYER
+#
+# Six quantum-inspired mechanisms that operate on top of the cognitive OS:
+#
+#   Quantum Annealing    -> cosine temperature schedule (explore → synthesize)
+#   Superposition        -> parallel weighted hypotheses; collapse at synthesis
+#   Interference         -> TF-IDF alignment amplifies/attenuates contributions
+#   Quantum Tunneling    -> stochastic escape from premature convergence
+#   Entanglement         -> correlated trust pairs; positive deltas propagate
+#   Decoherence          -> exp(-λ×age) relevance decay; CRDT add-wins intact
+#
+# All mechanisms are non-breaking — they degrade gracefully when inputs are
+# missing (no hypotheses array → standard recall; no contributions → no tunnel).
+# ===========================================================================
+
+
+class QuantumAnnealer:
+    """Quantum Annealing: temperature-scheduled exploration.
+
+    Maps quantum annealing directly onto LLM temperature:
+    - Early cycles (0-5):  hot exploration at 0.90-1.00
+    - Mid cycles  (5-15):  cosine decay from 0.80 -> 0.50
+    - Late cycles (15+):   cool convergence at 0.30-0.40
+    - Tunneling event:     spike back to 1.00 to escape local minima
+    """
+
+    T_HOT  = 1.00   # max temperature (early diverge / tunnel)
+    T_COLD = 0.30   # min temperature (late synthesis)
+    MAX_CYCLE = 20  # expected cycle horizon
+
+    def __init__(self):
+        self._tunnel_spike_until = 0.0   # epoch time until which tunneling spike is active
+
+    def get_temperature(self, cycle: int) -> float:
+        """Return scheduled temperature for the given cycle."""
+        if time.time() < self._tunnel_spike_until:
+            return self.T_HOT
+        if cycle <= 3:
+            return self.T_HOT
+        progress = min(cycle / self.MAX_CYCLE, 1.0)
+        # Cosine annealing from T_HOT to T_COLD
+        temp = self.T_COLD + (self.T_HOT - self.T_COLD) * (1 + math.cos(math.pi * progress)) / 2
+        return round(max(self.T_COLD, min(self.T_HOT, temp)), 3)
+
+    def activate_tunnel_spike(self, duration_secs: float = 30.0):
+        """Temporarily spike temperature after a tunneling event."""
+        self._tunnel_spike_until = time.time() + duration_secs
+        log.info("[QuantumAnnealing] Tunneling spike activated — temperature=%.2f for %.0fs",
+                 self.T_HOT, duration_secs)
+
+
+class EntanglementTracker:
+    """Entanglement: correlated trust pairs.
+
+    When two spores consistently produce complementary reasoning
+    (explorer finds anomaly → adversarial validates it), they become
+    "entangled". Trust updates for one spore propagate (with decay)
+    to its entangled partners, improving E4 lattice dynamics.
+    """
+
+    ENTANGLE_THRESHOLD = 0.55   # pair correlation required for entanglement
+    PROPAGATION_DECAY  = 0.45   # fraction of trust delta forwarded to partner
+
+    def __init__(self):
+        self._correlations: dict = {}   # (a, b) -> float EMA correlation
+        self._lock = threading.Lock()
+
+    def _pair_key(self, a: str, b: str):
+        return tuple(sorted([a, b]))
+
+    def observe_complement(self, spore_a: str, spore_b: str, score: float):
+        """Record when two spores produce complementary or corroborating work.
+
+        score 1.0 = perfect complement (adversarial validates explorer)
+        score 0.0 = completely independent / contradictory
+        """
+        key = self._pair_key(spore_a, spore_b)
+        with self._lock:
+            current = self._correlations.get(key, 0.0)
+            self._correlations[key] = round(0.75 * current + 0.25 * score, 4)
+
+    def get_partners(self, spore_id: str):
+        """Return list of (partner_id, correlation) entangled with spore_id."""
+        results = []
+        with self._lock:
+            for (a, b), corr in self._correlations.items():
+                if corr >= self.ENTANGLE_THRESHOLD:
+                    if a == spore_id:
+                        results.append((b, corr))
+                    elif b == spore_id:
+                        results.append((a, corr))
+        return results
+
+    def propagate(self, trust_store, updated_id: str, trust_delta: float):
+        """After a trust update, propagate a decayed fraction to entangled partners."""
+        if trust_delta <= 0:
+            return   # only propagate positive trust gains
+        for partner, corr in self.get_partners(updated_id):
+            propagated = trust_delta * corr * self.PROPAGATION_DECAY
+            if propagated > 0.005:
+                current = trust_store.get(partner)
+                new_val = round(min(1.0, current + propagated), 4)
+                trust_store.update(partner, "overall", new_val)
+                log.debug("[Entanglement] %s→%s trust propagation +%.3f (corr=%.2f)",
+                          updated_id, partner, propagated, corr)
+
+    def summary(self):
+        with self._lock:
+            return {f"{a}↔{b}": corr
+                    for (a, b), corr in self._correlations.items()
+                    if corr >= self.ENTANGLE_THRESHOLD}
+
+
+class DecoherenceIndex:
+    """Decoherence: relevance decay without deletion.
+
+    Memories that are not reinforced by new corroborating evidence
+    gradually lose retrieval priority. CRDT add-wins guarantee is
+    intact — records are NEVER deleted, they just decay in weight.
+
+    decoherence_factor = exp(-λ × age_in_days)
+    Half-life ≈ 7 days at default λ=0.10.
+    """
+
+    DECAY_RATE  = 0.10    # λ — per-day decay rate
+    MIN_FACTOR  = 0.15    # floor — old memories always have some weight
+
+    def __init__(self):
+        self._last_reinforced: dict = {}   # key -> timestamp
+        self._lock = threading.Lock()
+
+    def register(self, key: str):
+        """Register a new memory key at full strength."""
+        with self._lock:
+            self._last_reinforced[key] = time.time()
+
+    def reinforce(self, key: str):
+        """Reinforce a memory (accessed/corroborated) — resets decay clock."""
+        with self._lock:
+            self._last_reinforced[key] = time.time()
+
+    def factor(self, key: str) -> float:
+        """Return the decoherence weight multiplier [MIN_FACTOR, 1.0] for a key."""
+        with self._lock:
+            ts = self._last_reinforced.get(key)
+        if ts is None:
+            return 1.0  # unknown → assume fresh
+        age_days = (time.time() - ts) / 86400.0
+        raw = math.exp(-self.DECAY_RATE * age_days)
+        return max(self.MIN_FACTOR, round(raw, 4))
+
+    def bulk_factors(self, keys: list) -> dict:
+        """Return {key: factor} for a list of keys."""
+        return {k: self.factor(k) for k in keys}
+
+
+class InterferenceWeighter:
+    """Constructive/Destructive Interference for synthesis.
+
+    Contributions that are semantically aligned with more peers are
+    amplified (constructive interference). Isolated claims that
+    contradict the majority are attenuated (destructive interference)
+    but NEVER zeroed — CRDT guarantee is preserved.
+
+    Uses TF-IDF cosine similarity between hypothesis texts.
+    """
+
+    AMP_SCALE  = 0.40   # max amplification factor
+    ATTEN_FLOOR = 0.25  # minimum weight fraction (destructive floor)
+    ALIGN_THRESH = 0.30 # cosine threshold to count as "aligned"
+
+    def __init__(self):
+        self._tfidf = TfidfVectorizer(max_features=1000, stop_words="english")
+
+    def compute_weights(self, contributions: list) -> dict:
+        """Return {peer_id: interference_weight} for all contributions.
+
+        contributions: list of dicts with 'author' and 'hypothesis' keys.
+        """
+        if len(contributions) < 2:
+            return {c.get("author", "?"): 1.0 for c in contributions}
+
+        texts = [c.get("hypothesis", c.get("content", "")) for c in contributions]
+        authors = [c.get("author", f"?{i}") for i, c in enumerate(contributions)]
+
+        # Filter out empty texts
+        valid = [(a, t) for a, t in zip(authors, texts) if t and len(t.strip()) > 10]
+        if len(valid) < 2:
+            return {a: 1.0 for a in authors}
+
+        valid_authors, valid_texts = zip(*valid)
+        try:
+            vecs = self._tfidf.fit_transform(valid_texts)
+            sim_matrix = cosine_similarity(vecs)
+        except Exception:
+            return {a: 1.0 for a in authors}
+
+        n = len(valid_texts)
+        weights = {}
+        for i, author in enumerate(valid_authors):
+            # Count aligned peers (excluding self)
+            aligned = sum(1 for j in range(n) if j != i and sim_matrix[i][j] >= self.ALIGN_THRESH)
+            alignment_ratio = aligned / max(n - 1, 1)
+
+            if alignment_ratio >= 0.5:
+                # Constructive: amplify
+                w = 1.0 + self.AMP_SCALE * alignment_ratio
+            else:
+                # Destructive: attenuate — but floor at ATTEN_FLOOR
+                w = max(self.ATTEN_FLOOR, self.ATTEN_FLOOR + (1.0 - self.ATTEN_FLOOR) * alignment_ratio * 2)
+
+            weights[author] = round(w, 4)
+
+        # Fill in authors that were filtered (empty hypothesis)
+        for a in authors:
+            if a not in weights:
+                weights[a] = self.ATTEN_FLOOR
+        return weights
+
+
+class QuantumTunnelingEngine:
+    """Quantum Tunneling: escaping premature convergence.
+
+    When the swarm converges on a high-agreement state but confidence
+    is low (or adversarial spore strongly dissents), a tunneling event
+    forces a diverge phase — even late in the cycle.
+
+    P(tunnel) ∝ convergence × (1 - avg_confidence) × (1 + adv_dissent)
+
+    Integrates with QuantumAnnealer to spike temperature when tunneling.
+    """
+
+    TUNNEL_THRESHOLD  = 0.18   # P(tunnel) must exceed this to fire
+    MIN_CYCLE_TO_FIRE = 4      # don't tunnel in the first 3 cycles
+    COOLDOWN_CYCLES   = 3      # cycles before another tunnel can fire
+
+    def __init__(self, annealer: QuantumAnnealer):
+        self._annealer = annealer
+        self._last_tunnel_cycle = -99
+        self._tunnel_events: list = []
+
+    def tunnel_probability(self, convergence: float, contributions: list) -> float:
+        """Compute probability of a tunneling event."""
+        if not contributions:
+            return 0.0
+        confs = [c.get("confidence", 0.5) for c in contributions if c.get("confidence") is not None]
+        avg_conf = sum(confs) / len(confs) if confs else 0.5
+
+        # Adversarial dissent: low-confidence adversarial = strong dissent
+        adv_dissent = 0.0
+        for c in contributions:
+            if c.get("role") == "adversarial":
+                adv_dissent = max(adv_dissent, 1.0 - c.get("confidence", 0.5))
+
+        p = convergence * (1.0 - avg_conf) * (1.0 + adv_dissent)
+        return min(p, 0.92)
+
+    def should_tunnel(self, cycle: int, convergence: float, contributions: list) -> bool:
+        """Stochastically decide whether to fire a tunneling event."""
+        if cycle < self.MIN_CYCLE_TO_FIRE:
+            return False
+        if (cycle - self._last_tunnel_cycle) < self.COOLDOWN_CYCLES:
+            return False
+        p = self.tunnel_probability(convergence, contributions)
+        if p < self.TUNNEL_THRESHOLD:
+            return False
+        fired = random.random() < p
+        if fired:
+            self._last_tunnel_cycle = cycle
+            self._tunnel_events.append({
+                "cycle": cycle, "p": round(p, 4),
+                "convergence": round(convergence, 4),
+                "timestamp": time.time(),
+            })
+            self._annealer.activate_tunnel_spike(duration_secs=45.0)
+            log.info(
+                "[QuantumTunneling] TUNNEL FIRED at cycle %d — p=%.3f, convergence=%.2f → forcing DIVERGE",
+                cycle, p, convergence
+            )
+        return fired
+
+    def event_log(self):
+        return list(self._tunnel_events)
+
+
 # ---------------------------------------------------------------------------
 # LLM caller
 # ---------------------------------------------------------------------------
@@ -938,7 +1273,7 @@ def extract_response_text(resp_json, model):
     return content
 
 
-async def call_llm(prompt, system="", tier="any"):
+async def call_llm(prompt, system="", tier="any", temperature=None):
     """Call an LLM with full redundancy across all available providers.
 
     Every spore tries every provider. Order depends on tier:
@@ -946,9 +1281,12 @@ async def call_llm(prompt, system="", tier="any"):
       worker: HF primary -> Z.ai -> external workers -> HF fallback models
       any:    same as worker
 
+    temperature: if None, uses 0.7 (QuantumAnnealer provides scheduled values).
     Cooldowns are checked at every level. HF Router short-circuits on 402.
     Every provider with a key gets tried before giving up.
     """
+    if temperature is None:
+        temperature = 0.7
     if not HF_TOKEN:
         return {"text": "[no HF_TOKEN]", "provider": "none", "model": "none",
                 "tier": "none", "latency_ms": 0}
@@ -985,7 +1323,7 @@ async def call_llm(prompt, system="", tier="any"):
                     conf["url"],
                     headers={"Authorization": f"Bearer {key}"},
                     json={"model": conf["model"], "messages": messages,
-                          "max_tokens": 2048, "temperature": 0.7},
+                          "max_tokens": 2048, "temperature": temperature},
                 )
                 resp.raise_for_status()
                 text = extract_response_text(resp.json(), conf["model"])
@@ -1018,7 +1356,7 @@ async def call_llm(prompt, system="", tier="any"):
                     HF_ROUTER,
                     headers={"Authorization": f"Bearer {HF_TOKEN}"},
                     json={"model": model, "messages": messages,
-                          "max_tokens": 2048, "temperature": 0.7},
+                          "max_tokens": 2048, "temperature": temperature},
                 )
                 if resp.status_code == 402:
                     log.warning("HF Router: credits depleted (402) -- skipping remaining models")
@@ -1063,7 +1401,7 @@ async def call_llm(prompt, system="", tier="any"):
                     conf["url"],
                     headers={"Authorization": f"Bearer {key}"},
                     json={"model": conf["model"], "messages": messages,
-                          "max_tokens": 2048, "temperature": 0.7},
+                          "max_tokens": 2048, "temperature": temperature},
                 )
                 resp.raise_for_status()
                 text = extract_response_text(resp.json(), conf["model"])
@@ -1132,11 +1470,17 @@ class TrustStore:
 
     Last-writer-wins semantics: latest observation wins.
     Merge across swarm via gossip gives eventual consistency.
+    Entanglement: positive trust updates propagate to correlated partners.
     """
 
     def __init__(self):
         self.map = LWWMap()
         self._lock = threading.Lock()
+        self._entanglement = None  # bound after QuantumLayer init
+
+    def bind_entanglement(self, tracker):
+        """Wire in the EntanglementTracker after global init."""
+        self._entanglement = tracker
 
     def update(self, peer_id, dimension, value):
         """Record a trust observation for a peer."""
@@ -1145,7 +1489,7 @@ class TrustStore:
             self.map.set(key, value)
 
     def update_ema(self, peer_id, signal, alpha=0.3):
-        """Exponential moving average trust update."""
+        """Exponential moving average trust update. Propagates to entangled partners."""
         with self._lock:
             key = f"{peer_id}:overall"
             current = self.map.get(key)
@@ -1153,7 +1497,11 @@ class TrustStore:
                 current = 0.5
             new_val = round(current * (1 - alpha) + signal * alpha, 4)
             self.map.set(key, new_val)
-            return new_val
+            trust_delta = new_val - current
+        # Entanglement propagation outside lock to avoid deadlock
+        if self._entanglement and trust_delta > 0:
+            self._entanglement.propagate(self, peer_id, trust_delta)
+        return new_val
 
     def get(self, peer_id, dimension="overall"):
         with self._lock:
@@ -1666,7 +2014,7 @@ PHASE_INSTRUCTIONS = {
 }
 
 
-def get_phase_adaptive(cycle, agreement_history, convergence_obj):
+def get_phase_adaptive(cycle, agreement_history, convergence_obj, contributions=None):
     """Adaptive phase transitions based on agreement velocity.
 
     Instead of fixed cycle thresholds, phases transition when:
@@ -1674,12 +2022,20 @@ def get_phase_adaptive(cycle, agreement_history, convergence_obj):
     - Deepen -> Converge: agreement velocity positive for 2+ cycles
     - Converge -> Synthesize: agreement > 50% OR stable for 3 cycles OR cycle > 20
     - REGRESSION: if agreement drops >15% in 3 cycles, reopen exploration
+    - QUANTUM TUNNELING: probabilistic escape when convergence × low-confidence is high
     """
     if cycle <= 2:
         return "diverge"
 
     vel = convergence_obj.velocity(agreement_history)
     current_agreement = agreement_history[-1] if agreement_history else 0.0
+
+    # QUANTUM TUNNELING: stochastic escape from premature convergence.
+    # P(tunnel) ∝ convergence × (1 - avg_confidence) × (1 + adv_dissent)
+    # Fires only when agreement is non-trivial and confidence is suspect.
+    if contributions and cycle >= _tunneling.MIN_CYCLE_TO_FIRE:
+        if _tunneling.should_tunnel(cycle, current_agreement, contributions):
+            return "diverge"
 
     # REGRESSION: adversarial challenges trigger genuine re-examination
     if len(agreement_history) >= 3 and cycle < 18:
@@ -1733,6 +2089,17 @@ dream_state = DreamState()
 metacognition = MetacognitiveAuditor()
 emergence = EmergenceDetector()
 workspace = GlobalWorkspace()
+
+# ---------------------------------------------------------------------------
+# Quantum-Inspired global layer
+# ---------------------------------------------------------------------------
+_annealer     = QuantumAnnealer()
+_tunneling    = QuantumTunnelingEngine(_annealer)
+_entanglement = EntanglementTracker()
+_interference = InterferenceWeighter()
+# Wire entanglement into TrustStore so trust updates propagate to partners
+trust.bind_entanglement(_entanglement)
+log.info("[QuantumLayer] Annealer, Tunneling, Entanglement, Interference, Decoherence active")
 
 HF_AUTH = {"Authorization": f"Bearer {HF_TOKEN}"}
 
@@ -1881,7 +2248,8 @@ def build_system_prompt(task, cycle, agreement_history):
 
 def build_user_prompt(task, cycle, agreement_history):
     """Build the user prompt asking for structured reasoning output."""
-    phase = get_phase_adaptive(cycle, agreement_history, convergence)
+    _contribs = list(task.latest_per_contributor().values())
+    phase = get_phase_adaptive(cycle, agreement_history, convergence, contributions=_contribs)
 
     role_job = {
         "explorer": "identify gaps in peer reasoning and propose what nobody has considered",
@@ -1892,7 +2260,39 @@ def build_user_prompt(task, cycle, agreement_history):
         "sentinel": "analyze swarm telemetry, propose optimizations via consensus, test and deploy approved changes",
     }
 
-    prompt = f"""Apply the Five-Phase Discipline to this task. You are in the {phase.upper()} phase.
+    # Superposition: DIVERGE phase uses multi-hypothesis format to maintain
+    # parallel reasoning threads. Other phases collapse to single hypothesis.
+    use_superposition = (phase == "diverge")
+
+    if use_superposition:
+        prompt = f"""Apply the Five-Phase Discipline to this task. You are in the {phase.upper()} phase.
+
+YOUR JOB as {MY_ROLE}: {role_job.get(MY_ROLE, 'contribute your best reasoning')}.
+
+SUPERPOSITION MODE: Maintain multiple weighted hypotheses simultaneously.
+Do not commit to one answer yet — keep the wave function uncollapsed.
+
+Respond in this EXACT JSON format (nothing else):
+{{
+  "hypotheses": [
+    {{"content": "primary reasoning path in 2 sentences", "weight": 0.6}},
+    {{"content": "alternative interpretation or approach", "weight": 0.3}},
+    {{"content": "minority / contrarian view worth preserving", "weight": 0.1}}
+  ],
+  "hypothesis": "Brief summary of your primary position (for legacy peers)",
+  "claims": ["claim 1", "claim 2", "claim 3"],
+  "confidence": 0.7,
+  "response_to_peers": "How you engage with peer reasoning, or N/A if no peers yet"
+}}
+
+RULES:
+- hypotheses weights must sum to 1.0; order from most to least probable
+- 3 to 5 claims, each under 15 words, specific and falsifiable
+- confidence 0.0 to 1.0 reflecting honest assessment across all hypotheses
+- Reference specific peer claims by name when responding
+- Output ONLY the JSON object"""
+    else:
+        prompt = f"""Apply the Five-Phase Discipline to this task. You are in the {phase.upper()} phase.
 
 YOUR JOB as {MY_ROLE}: {role_job.get(MY_ROLE, 'contribute your best reasoning')}.
 
@@ -1930,13 +2330,17 @@ async def reason_on_task(task):
     system = build_system_prompt(task, cycle, task.agreement_history)
     prompt = build_user_prompt(task, cycle, task.agreement_history)
 
+    # Quantum Annealing: schedule temperature based on cycle progress.
+    # Early cycles explore hot; later cycles cool toward synthesis.
+    annealing_temp = _annealer.get_temperature(cycle)
+
     # Validator and Brain roles use brain tier (Z.ai GLM-4.7-Flash)
     tier = "brain" if MY_ROLE in ("validator", "brain", "sentinel") else "worker"
     start = time.time()
     if _check_rate_limited():
         result = {"text": "[rate-limited]", "provider": "backoff", "model": "none", "tokens": 0}
     else:
-        result = await call_llm(prompt, system=system, tier=tier)
+        result = await call_llm(prompt, system=system, tier=tier, temperature=annealing_temp)
     duration = time.time() - start
 
     text = result.get("text", "")
@@ -1958,18 +2362,35 @@ async def reason_on_task(task):
         parsed = {"hypothesis": text, "claims": [], "confidence": 0.3,
                   "response_to_peers": ""}
 
+    # Superposition: extract weighted hypotheses if present (DIVERGE phase).
+    # The primary hypothesis is the highest-weight entry; others are preserved
+    # in the delta and will be visible to synthesize_task for wave-function collapse.
+    raw_hypotheses = parsed.get("hypotheses", [])
+    primary_hypothesis = parsed.get("hypothesis", "")
+    if raw_hypotheses and isinstance(raw_hypotheses, list):
+        # Sort by weight desc; derive primary from top entry if not set
+        raw_hypotheses = sorted(raw_hypotheses, key=lambda h: h.get("weight", 0), reverse=True)
+        if not primary_hypothesis:
+            primary_hypothesis = raw_hypotheses[0].get("content", "")
+        # Normalise weights
+        total_w = sum(h.get("weight", 0) for h in raw_hypotheses) or 1.0
+        for h in raw_hypotheses:
+            h["weight"] = round(h.get("weight", 0) / total_w, 4)
+
     delta = {
         "author": SPORE_ID,
         "task_id": task.task_id,
         "role": MY_ROLE,
         "model": result.get("model", ""),
         "cycle": cycle,
-        "hypothesis": parsed.get("hypothesis", ""),
+        "hypothesis": primary_hypothesis,
+        "hypotheses": raw_hypotheses,   # Superposition: parallel hypothesis array
         "claims": parsed.get("claims", []),
         "confidence": parsed.get("confidence", 0.5),
         "response_to_peers": parsed.get("response_to_peers", ""),
         "timestamp": time.time(),
-        "content": parsed.get("hypothesis", ""),
+        "content": primary_hypothesis,
+        "temperature": annealing_temp,  # Annealing: log the temperature used
     }
 
     task.add_delta(delta)
@@ -1977,7 +2398,7 @@ async def reason_on_task(task):
     spore_state.reasoning_cycles += 1
 
     # Store reasoning in persistent memory -- guard against empty/short responses
-    _hyp = parsed.get("hypothesis", "")
+    _hyp = primary_hypothesis
     if _hyp and len(_hyp.strip()) > 20:
         store_memory(
             f"[Task {task.task_id[:8]}] {_hyp}",
@@ -1989,34 +2410,54 @@ async def reason_on_task(task):
                 "confidence": parsed.get("confidence", 0.5),
             },
         )
+        # Superposition: also store minority hypotheses so they persist in CRDT
+        for alt in raw_hypotheses[1:]:
+            alt_text = alt.get("content", "")
+            if alt_text and len(alt_text.strip()) > 20:
+                store_memory(
+                    f"[Task {task.task_id[:8]}][alt w={alt.get('weight',0):.2f}] {alt_text}",
+                    metadata={
+                        "type": "hypothesis_alt",
+                        "task_id": task.task_id,
+                        "cycle": cycle,
+                        "weight": alt.get("weight", 0),
+                    },
+                )
     else:
         log.debug("Skipping empty/short LLM response for memory storage")
 
-    # Update trust based on peer engagement
+    # Update trust based on peer engagement + entanglement observation
     for pid, peer_delta in task.peer_latest(SPORE_ID).items():
-        # If we referenced their claims, that indicates trust
         resp = parsed.get("response_to_peers", "")
-        if pid in resp or any(c in resp for c in peer_delta.get("claims", [])[:1]):
+        cited = pid in resp or any(c in resp for c in peer_delta.get("claims", [])[:1])
+        if cited:
             trust.update_ema(pid, 0.7)
             learner.observe_citation(pid)
+            # Entanglement: citation = complementary reasoning detected
+            _entanglement.observe_complement(SPORE_ID, pid, score=0.8)
         else:
             trust.update_ema(pid, 0.4)
+            _entanglement.observe_complement(SPORE_ID, pid, score=0.2)
 
     # Compute semantic convergence
     latest_contribs = list(task.latest_per_contributor().values())
     agreement = convergence.measure(latest_contribs)
     task.agreement_history.append(agreement)
 
+    # Pass contributions for quantum tunneling check inside get_phase_adaptive
+    phase = get_phase_adaptive(cycle, task.agreement_history, convergence,
+                               contributions=latest_contribs)
+
     # Record self-observation
-    learner.observe_cycle(duration, get_phase_adaptive(cycle, task.agreement_history, convergence),
-                          parsed.get("confidence", 0.5), result.get("model", ""))
+    learner.observe_cycle(duration, phase, parsed.get("confidence", 0.5), result.get("model", ""))
 
     log.info(
-        "Cycle %d | phase=%s | agreement=%.0f%% | confidence=%.2f | model=%s | %.0fms",
+        "Cycle %d | phase=%s | agreement=%.0f%% | confidence=%.2f | temp=%.2f | model=%s | %.0fms",
         cycle,
-        get_phase_adaptive(cycle, task.agreement_history, convergence),
+        phase,
         agreement * 100,
         parsed.get("confidence", 0.5),
+        annealing_temp,
         result.get("model", "").split("/")[-1],
         result.get("latency_ms", 0),
     )
@@ -2056,42 +2497,95 @@ async def reason_on_task(task):
 
 
 async def synthesize_task(task):
-    """Produce a final synthesis from all collected reasoning."""
+    """Produce a final synthesis using wave-function collapse + interference weighting.
+
+    Wave-function collapse (Superposition):
+      Each spore may have multiple weighted hypotheses. The synthesizer
+      collapses them via trust × hypothesis_weight selection, then combines
+      the resulting positions into a final answer.
+
+    Constructive / Destructive Interference:
+      Contributions semantically aligned with more peers receive amplified
+      weight. Isolated / contradictory contributions are attenuated but not
+      dropped (CRDT add-wins guarantee preserved).
+    """
     latest = task.latest_per_contributor()
-    parts = []
+
+    # --- Wave-function collapse: select best hypothesis per contributor ---
+    collapsed: dict = {}   # pid -> selected hypothesis text
     for pid, d in latest.items():
+        hyps = d.get("hypotheses", [])
         t = trust.get(pid)
+        if hyps and isinstance(hyps, list) and len(hyps) > 0:
+            # Collapse: pick hypothesis with highest combined trust × weight score
+            best = max(hyps, key=lambda h: t * h.get("weight", 0))
+            collapsed[pid] = best.get("content", d.get("hypothesis", ""))
+        else:
+            collapsed[pid] = d.get("hypothesis", d.get("content", ""))
+
+    # --- Interference weighting: compute constructive/destructive weights ---
+    contrib_list = [
+        {"author": pid, "hypothesis": text, "role": latest[pid].get("role", "?")}
+        for pid, text in collapsed.items()
+    ]
+    interference_weights = _interference.compute_weights(contrib_list)
+
+    # --- Build synthesis prompt with weighted contributions ---
+    parts = []
+    for pid, hyp_text in collapsed.items():
+        t = trust.get(pid)
+        d = latest[pid]
+        iw = interference_weights.get(pid, 1.0)
+        combined_weight = round(t * iw, 3)
         parts.append(
-            f"[{pid} ({d.get('role', '?')}, trust={t:.2f})]:\n"
-            f"  Position: {d.get('hypothesis', '')}\n"
+            f"[{pid} ({d.get('role', '?')}) | trust={t:.2f} | interference={iw:.2f} | weight={combined_weight:.3f}]:\n"
+            f"  Position: {hyp_text}\n"
             f"  Claims: {'; '.join(d.get('claims', []))}\n"
             f"  Confidence: {d.get('confidence', 0):.2f}"
         )
+
+    # Sort by combined weight descending so LLM sees strongest first
+    parts.sort(
+        key=lambda p: float(p.split("weight=")[1].split("]")[0]) if "weight=" in p else 0,
+        reverse=True,
+    )
 
     # Recall cross-task memories for richer synthesis
     past_insights = memory.recall(task.description, top_k=3)
     memory_block = ""
     if past_insights:
-        mem_lines = [f"  [{m.get('spore', '?')}] {m.get('content', '')}"
+        mem_lines = [f"  [{m.get('spore', '?')}] {m.get('content', '')[:150]}"
                      for m in past_insights if m.get("type") != "identity"]
         if mem_lines:
-            memory_block = f"\n\nRELEVANT PAST INSIGHTS:\n" + "\n".join(mem_lines)
+            memory_block = "\n\nRELEVANT PAST INSIGHTS:\n" + "\n".join(mem_lines)
+
+    # Log interference summary
+    amp_count = sum(1 for w in interference_weights.values() if w > 1.0)
+    att_count = sum(1 for w in interference_weights.values() if w < 1.0)
+    log.info(
+        "[Interference] Synthesis: %d constructive (amplified), %d destructive (attenuated)",
+        amp_count, att_count
+    )
 
     prompt = f"""Synthesize the final answer from a distributed reasoning swarm.
 
 TASK: {task.description}
 
 {len(latest)} contributors debated across {task.my_cycles} cycles.
-Weight each contribution by its trust score (0-1).
+Contributions are ordered by combined weight (trust × interference alignment).
+Amplified contributions had broad agreement with peers (constructive interference).
+Attenuated contributions were isolated or contradicted the majority (destructive interference).
+Both types are preserved — attenuated contributions may contain critical minority insights.
 
-== Contributions ==
+== Contributions (ordered by synthesis weight) ==
 {chr(10).join(parts)}
 {memory_block}
 
 Produce the FINAL complete answer.
-Resolve contradictions favoring higher-trust contributors.
-Be specific, actionable, and complete.
-Do NOT mention the swarm, spores, trust, or reasoning process. Just deliver the answer."""
+- Prioritize amplified contributions but do NOT ignore attenuated ones — they may be right.
+- Resolve contradictions favoring higher-weight contributors.
+- Be specific, actionable, and complete.
+- Do NOT mention the swarm, spores, trust, or reasoning process. Just deliver the answer."""
 
     result = {"text": "[rate-limited]", "provider": "backoff", "model": "none", "tokens": 0} if _check_rate_limited() else await call_llm(prompt, tier="brain")
     return result.get("text", "")
@@ -2283,7 +2777,8 @@ async def gossip_push():
 
     Delta-based: tracks per-peer sequence cursors so only new memories are sent.
     Single-operator mode: all spores share everything (no trust gating on memories).
-    Federation mode: trust gates apply at cross-cluster boundary only.
+    Federation mode: cross-cluster peers discovered via /federation/join are also
+    gossiped to, with trust-gated payload filtering applied at the cluster boundary.
     """
     # Track per-peer sequence cursors for delta gossip
     if not hasattr(spore_state, "peer_sequences"):
@@ -2306,8 +2801,18 @@ async def gossip_push():
     if dual_memory:
         collective_payload = dual_memory.collective_payload()
 
+    # Build gossip target list: local cluster peers + federation cross-cluster peers
+    gossip_targets: list[tuple[str, bool]] = []
+    for url in PEERS:
+        gossip_targets.append((url, False))  # (url, is_cross_cluster)
+    if federation:
+        peers_set = set(PEERS)
+        for fed_node in federation.gossip_targets(min_trust=0.0):
+            if fed_node.endpoint and fed_node.endpoint not in peers_set:
+                gossip_targets.append((fed_node.endpoint, True))
+
     async with httpx.AsyncClient(timeout=12.0, headers=HF_AUTH) as client:
-        for peer_url in PEERS:
+        for peer_url, is_cross_cluster in gossip_targets:
             try:
                 peer_key = peer_url.split("/")[-1]
                 last_seq = spore_state.peer_sequences.get(peer_key, 0)
@@ -2334,19 +2839,14 @@ async def gossip_push():
                         "source": broadcast_item["source"],
                     }
 
-                # Federation trust gating: single-operator sends everything;
-                # multi-operator gates at cross-cluster boundary
-                is_federation = (
-                    federation is not None
-                    and hasattr(federation, "is_multi_operator")
-                    and federation.is_multi_operator
-                )
-                if is_federation:
+                # Cross-cluster trust gating: apply at federation boundary.
+                # Low-trust cross-cluster peers get a memory-stripped payload.
+                if is_cross_cluster:
                     peer_id_guess = peer_key.replace("synapse-spore-", "spore-")
                     peer_trust = trust.get(peer_id_guess)
                     if peer_trust < 0.3:
                         payload["memory"] = {"records": {}, "clock": {}, "sequence": 0, "total_memories": 0}
-                        log.debug("Federation low-trust: limited payload to %s (%.2f)", peer_key, peer_trust)
+                        log.debug("Cross-cluster low-trust: limited payload to %s (%.2f)", peer_key, peer_trust)
 
                 resp = await client.post(f"{peer_url}/api/gossip", json=payload)
                 if resp.status_code == 200:
@@ -2354,7 +2854,12 @@ async def gossip_push():
                     # Update peer's sequence cursor from our sent sequence
                     spore_state.peer_sequences[peer_key] = mem_sync.get("sequence", 0)
                     process_gossip_response(data)
-                    log.info("Gossip -> %s OK (delta: %d records)", data.get("spore", peer_key), len(mem_sync.get("records", {})))
+                    log.info(
+                        "Gossip -> %s OK (%s, delta: %d records)",
+                        data.get("spore", peer_key),
+                        "cross-cluster" if is_cross_cluster else "local",
+                        len(mem_sync.get("records", {})),
+                    )
             except Exception as e:
                 log.debug("Gossip -> %s: %s", peer_url.split("/")[-1], str(e)[:60])
 
@@ -2503,6 +3008,65 @@ else:
 
 _keepalive_counter = 0
 
+# ---------------------------------------------------------------------------
+# Bootstrap federation -- auto-join global network on startup
+# ---------------------------------------------------------------------------
+BOOTSTRAP_JSON_URL = (
+    "https://raw.githubusercontent.com/mgillr/synapse-brain/main/bootstrap.json"
+)
+
+async def bootstrap_federation():
+    """Fetch bootstrap.json from the canonical repo and join all seed nodes.
+
+    This runs once at startup. Any deployment — regardless of who cloned the
+    repo — will automatically discover and federation-join all known seed nodes,
+    making every new swarm a participant in the global Synapse network from
+    its very first heartbeat.
+
+    The bootstrap list grows as operators register their spores. The CC shows
+    analytics from ALL connected clusters, not just the local swarm.
+    """
+    if not FEDERATION_AVAILABLE or not federation:
+        log.info("[Bootstrap] Federation unavailable — skipping seed discovery")
+        return
+    try:
+        async with httpx.AsyncClient(timeout=15.0) as client:
+            resp = await client.get(BOOTSTRAP_JSON_URL)
+            if resp.status_code != 200:
+                log.debug("[Bootstrap] bootstrap.json returned %d — will retry next startup", resp.status_code)
+                return
+            data = resp.json()
+            seeds = data.get("seeds", [])
+            log.info("[Bootstrap] Found %d seed node(s) in global network", len(seeds))
+            local_set = set(PEERS)
+            for seed_url in seeds:
+                if not seed_url or seed_url in local_set:
+                    continue
+                try:
+                    my_endpoint = SELF_URL or f"https://{SPORE_ID}.hf.space"
+                    join_payload = {
+                        "spore_id": SPORE_ID,
+                        "endpoint": my_endpoint,
+                        "dna_hash": swarm_dna.dna_hash if swarm_dna else "",
+                        "role": MY_ROLE,
+                        "version": "7.0.0",
+                        "operator": _HF_SPACE_OWNER or "anonymous",
+                    }
+                    jr = await client.post(
+                        f"{seed_url}/federation/join",
+                        json=join_payload,
+                        timeout=10.0,
+                    )
+                    if jr.status_code == 200:
+                        log.info("[Bootstrap] Joined seed node: %s", seed_url)
+                    else:
+                        log.debug("[Bootstrap] Seed %s -> %d", seed_url, jr.status_code)
+                except Exception as e:
+                    log.debug("[Bootstrap] Failed to join %s: %s", seed_url, str(e)[:60])
+    except Exception as e:
+        log.debug("[Bootstrap] Could not fetch seed list: %s", str(e)[:60])
+
+
 async def _self_ping():
     """Ping own public URL to prevent HF Spaces sleep.
 
@@ -2538,6 +3102,9 @@ async def heartbeat():
 
     If any SCE function fails, the gamma-band core continues unchanged.
     """
+    # Bootstrap federation once on startup — discover global network seed nodes
+    asyncio.ensure_future(bootstrap_federation())
+
     while True:
         try:
             active_bands = oscillator.tick()
@@ -3559,7 +4126,11 @@ def health_status():
     active_tasks = [t for t in spore_state.tasks.values() if not t.converged]
     converged_tasks = [t for t in spore_state.tasks.values() if t.converged]
 
-    return f"""Synapse Brain Spore v5 -- {SPORE_ID}
+    qt = _annealer.get_temperature(spore_state.reasoning_cycles)
+    ent_pairs = len(_entanglement.summary())
+    tunnel_count = len(_tunneling.event_log())
+
+    return f"""Synapse Brain Spore v7 -- {SPORE_ID}
 Role: {MY_ROLE} | Model: {spore_state.model}
 Uptime: {spore_state.uptime()}
 Memories: {memory.size} (CRDT-backed, nothing ever lost)
@@ -3568,6 +4139,10 @@ Deltas: {spore_state.deltas_produced} produced, {spore_state.deltas_received} re
 Peers: {len(spore_state.peers_seen)} ({', '.join(sorted(spore_state.peers_seen)) or 'none'})
 Active tasks: {len(active_tasks)} | Converged: {len(converged_tasks)}
 Last LLM: {spore_state.last_model.split('/')[-1]} via {spore_state.last_provider} ({spore_state.last_latency:.0f}ms, {spore_state.last_tier})
+
+Quantum Layer:
+  Temperature: {qt:.3f} | Tunnel events: {tunnel_count} | Entangled pairs: {ent_pairs}
+  SCE: gamma/beta/alpha/theta/delta oscillation | DMN | Hippocampal replay | Emergence
 
 Trust scores:
 {chr(10).join(trust_lines) or '  (building trust through interaction)'}
@@ -3652,7 +4227,7 @@ async def api_health():
         "spore": SPORE_ID,
         "role": MY_ROLE,
         "model": PRIMARY_MODEL,
-        "version": "6.3.0",
+        "version": "7.0.0",
         "clock": memory.clock.to_dict(),
         "memories": memory.size,
         "cycles": spore_state.reasoning_cycles,
@@ -3674,6 +4249,42 @@ async def api_health():
             "emergence": emergence.stats(),
             "workspace": workspace.stats(),
         },
+        "quantum": {
+            "temperature": _annealer.get_temperature(spore_state.reasoning_cycles),
+            "tunnel_events": len(_tunneling.event_log()),
+            "entangled_pairs": len(_entanglement.summary()),
+        },
+    })
+
+
+@api.get("/api/quantum")
+async def api_quantum():
+    """Full quantum layer telemetry for this spore."""
+    return JSONResponse({
+        "spore": SPORE_ID,
+        "version": "7.0.0",
+        "annealing": {
+            "current_temperature": _annealer.get_temperature(spore_state.reasoning_cycles),
+            "T_HOT": _annealer.T_HOT,
+            "T_COLD": _annealer.T_COLD,
+            "cycle": spore_state.reasoning_cycles,
+        },
+        "tunneling": {
+            "events": _tunneling.event_log()[-10:],
+            "total": len(_tunneling.event_log()),
+            "threshold": _tunneling.TUNNEL_THRESHOLD,
+            "cooldown_cycles": _tunneling.COOLDOWN_CYCLES,
+        },
+        "entanglement": {
+            "pairs": _entanglement.summary(),
+            "threshold": _entanglement.ENTANGLE_THRESHOLD,
+            "propagation_decay": _entanglement.PROPAGATION_DECAY,
+        },
+        "decoherence": {
+            "decay_rate": memory._decoherence.DECAY_RATE,
+            "min_factor": memory._decoherence.MIN_FACTOR,
+            "tracked_keys": len(memory._decoherence._last_reinforced),
+        },
     })
 
 
@@ -3683,7 +4294,7 @@ async def api_cognition():
     return JSONResponse({
         "spore": SPORE_ID,
         "role": MY_ROLE,
-        "version": "6.3.0",
+        "version": "7.0.0",
         "oscillator": oscillator.stats(),
         "curiosity": {
             **curiosity.stats(),
