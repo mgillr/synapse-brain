@@ -2754,6 +2754,100 @@ async def metacognitive_audit():
         log.debug("Metacognitive audit failed: %s", str(e)[:60])
 
 
+async def sentinel_update_bootstrap():
+    """Sentinel delta-band task: auto-register verified federation peers into bootstrap.json.
+
+    When any operator deploys a new swarm and their spores call /federation/join
+    on our seeds, the federation registry records those endpoints in memory. This
+    function writes them permanently to bootstrap.json on GitHub so every future
+    clone auto-discovers them at startup — making the network truly self-growing.
+
+    Requires GITHUB_TOKEN set as an HF Space secret on the Sentinel spore.
+    Requires SYNAPSE_REPO_OWNER and SYNAPSE_REPO_NAME env vars (set at deploy time).
+    Only fires when new endpoints are found that aren't already in the seed list.
+    """
+    import base64
+
+    github_token = os.environ.get("GITHUB_TOKEN", "")
+    if not github_token:
+        return  # Sentinel doesn't have GitHub write access — skip silently
+    if not federation:
+        return
+
+    repo_owner = _REPO_OWNER or "mgillr"
+    repo_name  = _REPO_NAME  or "synapse-brain"
+    api_url = f"https://api.github.com/repos/{repo_owner}/{repo_name}/contents/bootstrap.json"
+    headers = {
+        "Authorization": f"token {github_token}",
+        "Accept": "application/vnd.github.v3+json",
+    }
+
+    try:
+        async with httpx.AsyncClient(timeout=20.0) as client:
+            # 1. Fetch current bootstrap.json + its SHA (required for update)
+            resp = await client.get(api_url, headers=headers)
+            if resp.status_code != 200:
+                log.debug("[Bootstrap-Sentinel] Could not fetch bootstrap.json: %d", resp.status_code)
+                return
+
+            file_data = resp.json()
+            current_sha = file_data["sha"]
+            current_content = json.loads(base64.b64decode(file_data["content"]).decode())
+            current_seeds = set(current_content.get("seeds", []))
+
+            # 2. Collect all verified federation endpoints this Sentinel knows about
+            new_endpoints = set()
+            try:
+                for node in federation.all_nodes():
+                    ep = getattr(node, "endpoint", None)
+                    # Only register endpoints that look like real HF Space URLs
+                    if ep and ep.startswith("https://") and ".hf.space" in ep:
+                        t = trust.get(getattr(node, "spore_id", ""))
+                        if t >= 0.25:  # light trust gate: must have had some positive interaction
+                            new_endpoints.add(ep.rstrip("/"))
+            except Exception:
+                return  # federation API mismatch — skip
+
+            to_add = new_endpoints - current_seeds
+            if not to_add:
+                return  # nothing new
+
+            # 3. Build updated content and push
+            updated_seeds = sorted(current_seeds | to_add)
+            current_content["seeds"] = updated_seeds
+            new_json = json.dumps(current_content, indent=2) + "\n"
+            encoded = base64.b64encode(new_json.encode()).decode()
+
+            commit_resp = await client.put(
+                api_url,
+                headers=headers,
+                json={
+                    "message": (
+                        f"[Sentinel] auto-register {len(to_add)} new federation peer(s)\n\n"
+                        + "\n".join(f"  + {ep}" for ep in sorted(to_add))
+                    ),
+                    "content": encoded,
+                    "sha": current_sha,
+                    "committer": {
+                        "name": "Synapse Sentinel",
+                        "email": "sentinel@synapse-brain.ai",
+                    },
+                },
+            )
+            if commit_resp.status_code in (200, 201):
+                log.info(
+                    "[Bootstrap-Sentinel] Registered %d new seed(s) into bootstrap.json: %s",
+                    len(to_add), ", ".join(sorted(to_add))
+                )
+            else:
+                log.debug(
+                    "[Bootstrap-Sentinel] Push failed: %d %s",
+                    commit_resp.status_code, commit_resp.text[:120]
+                )
+    except Exception as e:
+        log.debug("[Bootstrap-Sentinel] Error: %s", str(e)[:80])
+
+
 def curiosity_scan_gossip(peer_id, incoming_deltas, incoming_memories):
     """Beta-band: measure surprise of incoming gossip. Feed curiosity metric."""
     for d in incoming_deltas:
@@ -3196,6 +3290,11 @@ async def heartbeat():
                             "Emergence detected: %d spores independently converged on %s",
                             ev["count"], ev["claim_hash"]
                         )
+
+                    # Sentinel: auto-register new federation peers into bootstrap.json
+                    if MY_ROLE == "sentinel":
+                        await sentinel_update_bootstrap()
+
                 except Exception as e:
                     log.debug("Delta band error: %s", str(e)[:60])
 
