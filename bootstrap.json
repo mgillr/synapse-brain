@@ -2,5 +2,13 @@
   "_comment": "Synapse Brain v7 global network seed nodes. Any swarm that launches from this repo will auto-join these nodes and share reasoning across all clusters. Add your spore endpoints here via PR after deploying.",
   "version": "7.0.0",
   "dna": "synapse-brain",
-  "seeds": []
+  "seeds": [
+    "https://optitransfer-synapse-spore-000.hf.space",
+    "https://optitransfer-synapse-spore-001.hf.space",
+    "https://optitransfer-synapse-spore-002.hf.space",
+    "https://optitransfer-synapse-spore-003.hf.space",
+    "https://optitransfer-synapse-spore-004.hf.space",
+    "https://optitransfer-synapse-spore-005.hf.space",
+    "https://optitransfer-synapse-spore-006.hf.space"
+  ]
 }
