@@ -28,17 +28,41 @@ _SPORE_TEMPLATE = [
 ]
 
 
-def _build_core_spores():
-    """Build CORE_SPORES from env vars (set by launch_swarm.py) or fall back to placeholders.
+def _spore_dict_from_url(url, idx=0):
+    role, model, color = _SPORE_TEMPLATE[idx % len(_SPORE_TEMPLATE)]
+    sid = f"{idx:03d}"
+    try:
+        tail = url.rsplit("-", 1)[-1].split(".", 1)[0]
+        if tail.isdigit():
+            sid = tail
+    except Exception:
+        pass
+    return {
+        "id": sid,
+        "url": url.rstrip("/"),
+        "role": role,
+        "model": model,
+        "color": color,
+        "commander": "default",
+    }
 
-    Resolution order:
-      1. SYNAPSE_SPORES env var (JSON list of URL strings)
-      2. SPORE_URLS env var (newline/comma-separated URL list)
-      3. HF_OWNER + SPORE_PREFIX env vars → derive {owner}-{prefix}-NNN.hf.space
-      4. Placeholder URLs (will not resolve -- visible warning state)
-    """
+
+def _urls_from_bootstrap(timeout=6.0):
+    """Fetch bootstrap.json and return its seeds list. Empty list on any failure."""
+    try:
+        with httpx.Client(timeout=timeout, follow_redirects=True) as c:
+            r = c.get(BOOTSTRAP_URL)
+            if r.status_code != 200:
+                return []
+            data = r.json()
+            seeds = data.get("seeds", []) if isinstance(data, dict) else []
+            return [str(s).strip().rstrip("/") for s in seeds if s]
+    except Exception:
+        return []
+
+
+def _urls_from_env():
     urls = []
-
     raw = os.environ.get("SYNAPSE_SPORES", "").strip()
     if raw:
         try:
@@ -47,7 +71,6 @@ def _build_core_spores():
                 urls = [str(u).strip().rstrip("/") for u in data if u]
         except Exception:
             pass
-
     if not urls:
         raw = os.environ.get("SPORE_URLS", "").strip()
         if raw:
@@ -55,37 +78,34 @@ def _build_core_spores():
                 line = line.strip().rstrip("/")
                 if line:
                     urls.append(line)
-
     if not urls:
         owner = os.environ.get("HF_OWNER", "").strip().lower()
         prefix = os.environ.get("SPORE_PREFIX", "synapse-spore").strip()
         count = int(os.environ.get("SPORE_COUNT", "7") or "7")
         if owner:
             urls = [f"https://{owner}-{prefix}-{i:03d}.hf.space" for i in range(count)]
+    return urls
 
+
+def _build_core_spores():
+    """Resolve seed URLs from bootstrap.json + env vars, deduplicated.
+
+    Order: bootstrap.json (canonical, lists every known spore in the network)
+    then env-derived URLs as a supplement. Placeholder fallback only if both
+    sources return nothing -- visible misconfiguration warning in the UI.
+    """
+    urls = []
+    seen = set()
+    for u in _urls_from_bootstrap() + _urls_from_env():
+        if u and u not in seen:
+            seen.add(u)
+            urls.append(u)
     if not urls:
-        # Last resort: visible placeholders so users see the misconfiguration in the UI.
         urls = [f"https://your-prefix-synapse-spore-{i:03d}.hf.space" for i in range(7)]
-
-    spores = []
-    for i, url in enumerate(urls):
-        role, model, color = _SPORE_TEMPLATE[i % len(_SPORE_TEMPLATE)]
-        # Try to extract a stable id from the URL (last 3 digits of the spore name).
-        sid = f"{i:03d}"
-        try:
-            tail = url.rsplit("-", 1)[-1].split(".", 1)[0]
-            if tail.isdigit():
-                sid = tail
-        except Exception:
-            pass
-        spores.append({
-            "id": sid,
-            "url": url,
-            "role": role,
-            "model": model,
-            "color": color,
-            "commander": "default",
-        })
+    spores = [_spore_dict_from_url(u, i) for i, u in enumerate(urls)]
+    print(f"[CC] CORE_SPORES resolved: {len(spores)} seed URLs", flush=True)
+    for s in spores:
+        print(f"  - {s['id']}: {s['url']}", flush=True)
     return spores
 
 
@@ -195,7 +215,8 @@ def safe_post(url, data, timeout=15):
 def _poll_node(nid, node):
     """Poll a single node for health + federation. Thread-safe."""
     node = dict(node)
-    health = safe_get(f"{node['url']}/api/health", timeout=10.0)
+    # 20s accommodates HF Space cold-start wake-up (~10-15s) on idle spores.
+    health = safe_get(f"{node['url']}/api/health", timeout=20.0)
     if not health:
         node["online"] = False
         return node, {}
@@ -240,7 +261,8 @@ def discover_nodes():
     with concurrent.futures.ThreadPoolExecutor(max_workers=10) as pool:
         futures = {pool.submit(_poll_node, nid, node): nid for nid, node in list(nodes.items())}
         try:
-            for future in concurrent.futures.as_completed(futures, timeout=30):
+            # 60s window absorbs 20s cold-start health + 5s fed + one retry per poll.
+            for future in concurrent.futures.as_completed(futures, timeout=60):
                 try:
                     node, new_peers = future.result()
                     nodes[node["id"]] = node
