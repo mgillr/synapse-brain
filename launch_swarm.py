@@ -58,6 +58,7 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--google-key", type=str, help="Google AI Studio key")
     p.add_argument("--cerebras-key", type=str, help="Cerebras API key")
     p.add_argument("--mistral-key", type=str, help="Mistral API key")
+    p.add_argument("--github-token", type=str, help="GitHub token for WAL backup")
     p.add_argument("--peers", type=str, nargs="*", help="Peer URLs to join")
     p.add_argument("--deploy-cc", action="store_true", help="Also deploy a Command Center Space")
     p.add_argument("--cc-name", type=str, default="synapse-cc", help="CC Space name")
@@ -112,6 +113,8 @@ def merge_config(args: argparse.Namespace) -> dict:
         api_keys["cerebras"] = args.cerebras_key
     if args.mistral_key:
         api_keys["mistral"] = args.mistral_key
+    if getattr(args, "github_token", None):
+        api_keys["github"] = args.github_token
     cfg["api_keys"] = api_keys
 
     # CC deploy flags from CLI
@@ -126,7 +129,7 @@ def merge_config(args: argparse.Namespace) -> dict:
     for env_key, cfg_key in [
         ("ZAI_API_KEY", "zai"), ("OPENROUTER_KEY", "openrouter"),
         ("GOOGLE_AI_KEY", "google_ai"), ("XAI_API_KEY", "xai"),
-        ("LLMAPI_KEY", "llmapi"),
+        ("LLMAPI_KEY", "llmapi"), ("GITHUB_TOKEN", "github"),
     ]:
         if not api_keys.get(cfg_key) and os.environ.get(env_key):
             api_keys[cfg_key] = os.environ[env_key]
@@ -459,6 +462,7 @@ def main():
         "groq": "GROQ_API_KEY",
         "cerebras": "CEREBRAS_API_KEY",
         "mistral": "MISTRAL_API_KEY",
+        "github": "GITHUB_TOKEN",
     }
     for cfg_key, env_key in key_map.items():
         if api_keys.get(cfg_key):

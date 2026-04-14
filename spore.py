@@ -43,6 +43,7 @@ its own questions, evaluates its own blindspots, and acts on its own curiosity.
 """
 import asyncio
 import hashlib
+import hmac
 import json
 import logging
 import math
@@ -637,6 +638,14 @@ class CRDTMemory:
         self._decoherence.register(key)
         self._decoherence._last_reinforced[key] = ts  # use original store time
 
+    def wal_path(self):
+        """Expose WAL path for GitHub backup."""
+        return self._wal_path
+
+    def wal_entry_count(self):
+        """Number of entries in WAL (approximate, from sequence counter)."""
+        return self._sequence
+
     # --- Semantic dedup ---
 
     def _is_near_duplicate(self, content):
@@ -870,6 +879,221 @@ class CRDTMemory:
         with self._lock:
             v = self.orset.value
             return len(v) if v else 0
+
+
+# ---------------------------------------------------------------------------
+# Unified State WAL -- persistent state for all cognitive subsystems
+# ---------------------------------------------------------------------------
+
+class StateWAL:
+    """Generic WAL for non-memory state types.
+
+    Follows the same pattern as CRDTMemory's WAL:
+    JSON lines, append-only, replay on startup.
+    Used by TrustStore, CuriosityMetric, FreeThoughtEngine,
+    DreamState, and EmergenceDetector.
+    """
+
+    def __init__(self, spore_id, name):
+        self._dir = "/data/synapse" if os.path.isdir("/data") else "/tmp/synapse-wal"
+        os.makedirs(self._dir, exist_ok=True)
+        self._path = os.path.join(self._dir, f"{name}_{spore_id}.wal")
+        self._file = None
+        self._entries = 0
+
+    def append(self, entry_type, data):
+        """Append a typed state entry to the WAL."""
+        entry = {"t": entry_type, "ts": time.time(), "d": data}
+        try:
+            if self._file is None:
+                self._file = open(self._path, "a", buffering=8192)
+            self._file.write(json.dumps(entry, default=str) + "\n")
+            self._entries += 1
+        except OSError as e:
+            log.warning("StateWAL write failed (%s): %s", entry_type, e)
+
+    def flush(self):
+        if self._file:
+            try:
+                self._file.flush()
+                os.fsync(self._file.fileno())
+            except OSError:
+                pass
+
+    def close(self):
+        if self._file:
+            try:
+                self._file.close()
+            except OSError:
+                pass
+            self._file = None
+
+    def replay(self):
+        """Read all WAL entries."""
+        entries = []
+        if not os.path.exists(self._path):
+            return entries
+        with open(self._path) as f:
+            for line in f:
+                try:
+                    entries.append(json.loads(line.strip()))
+                except (json.JSONDecodeError, KeyError):
+                    continue
+        if entries:
+            log.info("StateWAL replay: %d entries from %s", len(entries), self._path)
+        return entries
+
+    @property
+    def path(self):
+        return self._path
+
+
+class GitHubBackup:
+    """Encrypted backup/restore of all WAL state via GitHub Contents API.
+
+    All WAL files are compressed, encrypted (XOR stream cipher + HMAC),
+    and pushed to the repo as .synapse-backup/{spore_id}.enc.
+    On startup, if local WAL is empty, pulls and restores from GitHub.
+
+    Encryption uses stdlib only (hashlib + hmac) -- no external deps.
+    Key derived from HF_TOKEN for zero-config operation.
+    """
+
+    BACKUP_DIR = ".synapse-backup"
+
+    def __init__(self, spore_id):
+        self._spore_id = spore_id
+        self._token = os.environ.get("GITHUB_TOKEN", "")
+        self._hf_token = os.environ.get("HF_TOKEN", "")
+        repo_owner = os.environ.get("SYNAPSE_REPO_OWNER", "mgillr")
+        repo_name = os.environ.get("SYNAPSE_REPO_NAME", "synapse-brain")
+        self._api_url = (
+            f"https://api.github.com/repos/{repo_owner}/{repo_name}"
+            f"/contents/{self.BACKUP_DIR}/{spore_id}.enc"
+        )
+        self._headers = {
+            "Authorization": f"token {self._token}",
+            "Accept": "application/vnd.github.v3+json",
+        }
+
+    def _derive_key(self):
+        """Derive 32-byte encryption key from HF_TOKEN."""
+        return hashlib.sha256(
+            f"synapse-wal-key:{self._hf_token}:{self._spore_id}".encode()
+        ).digest()
+
+    def _encrypt(self, data: bytes) -> bytes:
+        """XOR stream cipher with HMAC integrity. Stdlib only."""
+        key = self._derive_key()
+        # Generate keystream: SHA-256(key || counter) for each 32-byte block
+        keystream = bytearray()
+        for i in range(0, len(data), 32):
+            block_key = hashlib.sha256(key + i.to_bytes(4, "big")).digest()
+            keystream.extend(block_key)
+        encrypted = bytes(a ^ b for a, b in zip(data, keystream[: len(data)]))
+        # HMAC for integrity verification
+        mac = hmac.new(key, encrypted, hashlib.sha256).digest()
+        return mac + encrypted
+
+    def _decrypt(self, data: bytes) -> bytes:
+        """Decrypt and verify integrity."""
+        key = self._derive_key()
+        mac = data[:32]
+        encrypted = data[32:]
+        expected = hmac.new(key, encrypted, hashlib.sha256).digest()
+        if not hmac.compare_digest(mac, expected):
+            raise ValueError("Backup integrity check failed")
+        keystream = bytearray()
+        for i in range(0, len(encrypted), 32):
+            block_key = hashlib.sha256(key + i.to_bytes(4, "big")).digest()
+            keystream.extend(block_key)
+        return bytes(a ^ b for a, b in zip(encrypted, keystream[: len(encrypted)]))
+
+    async def push(self, wal_paths: list[str]):
+        """Compress, encrypt, and push all WAL files to GitHub."""
+        if not self._token:
+            return
+        import base64
+        import gzip
+
+        # Collect all WAL data into one archive
+        archive = {}
+        for path in wal_paths:
+            if os.path.exists(path):
+                with open(path, "rb") as f:
+                    archive[os.path.basename(path)] = base64.b64encode(f.read()).decode()
+        if not archive:
+            return
+
+        payload = json.dumps(archive).encode()
+        compressed = gzip.compress(payload, compresslevel=9)
+        encrypted = self._encrypt(compressed)
+        encoded = base64.b64encode(encrypted).decode()
+
+        try:
+            async with httpx.AsyncClient(timeout=30.0) as client:
+                # Get current SHA if file exists
+                sha = None
+                resp = await client.get(self._api_url, headers=self._headers)
+                if resp.status_code == 200:
+                    sha = resp.json().get("sha")
+
+                body = {
+                    "message": f"[backup] {self._spore_id} state snapshot ({len(archive)} WALs)",
+                    "content": encoded,
+                    "committer": {
+                        "name": "Synapse Spore",
+                        "email": "spore@synapse-brain.ai",
+                    },
+                }
+                if sha:
+                    body["sha"] = sha
+
+                resp = await client.put(self._api_url, headers=self._headers, json=body)
+                if resp.status_code in (200, 201):
+                    log.info(
+                        "[Backup] Pushed %d WAL files to GitHub (%d bytes)",
+                        len(archive), len(encrypted),
+                    )
+                else:
+                    log.debug(
+                        "[Backup] Push failed: %d %s",
+                        resp.status_code, resp.text[:120],
+                    )
+        except Exception as e:
+            log.debug("[Backup] Error: %s", str(e)[:80])
+
+    async def pull(self) -> dict[str, bytes]:
+        """Download, decrypt, and decompress WAL archive from GitHub."""
+        if not self._token:
+            return {}
+        import base64
+        import gzip
+
+        try:
+            async with httpx.AsyncClient(timeout=30.0) as client:
+                resp = await client.get(self._api_url, headers=self._headers)
+                if resp.status_code != 200:
+                    log.debug("[Restore] No backup found on GitHub: %d", resp.status_code)
+                    return {}
+
+                file_data = resp.json()
+                encrypted = base64.b64decode(file_data["content"])
+                compressed = self._decrypt(encrypted)
+                payload = gzip.decompress(compressed)
+                archive = json.loads(payload)
+
+                result = {}
+                for name, b64_data in archive.items():
+                    result[name] = base64.b64decode(b64_data)
+
+                log.info(
+                    "[Restore] Downloaded %d WAL files from GitHub", len(result)
+                )
+                return result
+        except Exception as e:
+            log.warning("[Restore] Failed: %s", str(e)[:120])
+            return {}
 
 
 # ---------------------------------------------------------------------------
@@ -1520,12 +1744,18 @@ class TrustStore:
     Last-writer-wins semantics: latest observation wins.
     Merge across swarm via gossip gives eventual consistency.
     Entanglement: positive trust updates propagate to correlated partners.
+    WAL-backed: trust mutations survive restart via StateWAL + GitHub backup.
     """
 
     def __init__(self):
         self.map = LWWMap()
         self._lock = threading.Lock()
         self._entanglement = None  # bound after QuantumLayer init
+        self._wal = None  # bound after global init via bind_wal()
+
+    def bind_wal(self, wal):
+        """Wire in StateWAL after global init."""
+        self._wal = wal
 
     def bind_entanglement(self, tracker):
         """Wire in the EntanglementTracker after global init."""
@@ -1536,6 +1766,8 @@ class TrustStore:
         with self._lock:
             key = f"{peer_id}:{dimension}"
             self.map.set(key, value)
+        if self._wal:
+            self._wal.append("trust_update", {"peer": peer_id, "dim": dimension, "val": value})
 
     def update_ema(self, peer_id, signal, alpha=0.3):
         """Exponential moving average trust update. Propagates to entangled partners."""
@@ -1547,6 +1779,8 @@ class TrustStore:
             new_val = round(current * (1 - alpha) + signal * alpha, 4)
             self.map.set(key, new_val)
             trust_delta = new_val - current
+        if self._wal:
+            self._wal.append("trust_ema", {"peer": peer_id, "signal": signal, "val": new_val})
         # Entanglement propagation outside lock to avoid deadlock
         if self._entanglement and trust_delta > 0:
             self._entanglement.propagate(self, peer_id, trust_delta)
@@ -1581,6 +1815,33 @@ class TrustStore:
     def to_dict(self):
         with self._lock:
             return self.map.to_dict()
+
+    def restore_from_wal(self, entries):
+        """Replay trust WAL entries to restore trust state."""
+        for entry in entries:
+            try:
+                d = entry.get("d", {})
+                t = entry.get("t", "")
+                if t == "trust_update":
+                    key = f"{d['peer']}:{d['dim']}"
+                    with self._lock:
+                        self.map.set(key, d["val"])
+                elif t == "trust_ema":
+                    key = f"{d['peer']}:overall"
+                    with self._lock:
+                        self.map.set(key, d["val"])
+                elif t == "trust_merge":
+                    with self._lock:
+                        incoming = LWWMap.from_dict(d["map"])
+                        self.map = self.map.merge(incoming)
+            except Exception:
+                continue
+        log.info("[Trust] Restored from %d WAL entries", len(entries))
+
+    @property
+    def wal_path(self):
+        return self._wal.path if self._wal else None
+
 
 
 # ---------------------------------------------------------------------------
@@ -1655,6 +1916,10 @@ class CuriosityMetric:
         self._surprise_log = []
         self._baseline = 0.5
         self._max_log = 500
+        self._wal = None
+
+    def bind_wal(self, wal):
+        self._wal = wal
 
     def measure_surprise(self, content, memory_inst, trust_store=None):
         """Novelty score: 0.0 = already known, 1.0 = completely new."""
@@ -1671,6 +1936,8 @@ class CuriosityMetric:
         self._surprise_log.append((time.time(), novelty, content[:80]))
         if len(self._surprise_log) > self._max_log:
             self._surprise_log = self._surprise_log[-self._max_log:]
+        if self._wal and novelty > 0.5:
+            self._wal.append("surprise", {"novelty": round(novelty, 4), "content": content[:80]})
         return novelty
 
     def curiosity_drive(self):
@@ -1712,6 +1979,10 @@ class FreeThoughtEngine:
         self._min_interval = 100  # seconds between free thoughts
         self._insights = []
         self._max_insights = 200
+        self._wal = None
+
+    def bind_wal(self, wal):
+        self._wal = wal
 
     def should_think(self, has_pending_tasks):
         """Only free-think when idle and enough time has passed."""
@@ -1750,6 +2021,8 @@ class FreeThoughtEngine:
         })
         if len(self._insights) > self._max_insights:
             self._insights = self._insights[-self._max_insights:]
+        if self._wal:
+            self._wal.append("free_thought", {"thought": thought[:200], "novelty": round(novelty, 4)})
 
     def stats(self):
         return {
@@ -1780,6 +2053,10 @@ class DreamState:
         self._dream_count = 0
         self._insights = []
         self._max_insights = 100
+        self._wal = None
+
+    def bind_wal(self, wal):
+        self._wal = wal
 
     def should_dream(self):
         return time.time() - self._last_dream > self._dream_interval
@@ -1815,6 +2092,8 @@ class DreamState:
         })
         if len(self._insights) > self._max_insights:
             self._insights = self._insights[-self._max_insights:]
+        if self._wal:
+            self._wal.append("dream", {"insight": insight[:200], "novelty": round(novelty, 4)})
 
     def stats(self):
         return {
@@ -1912,6 +2191,10 @@ class EmergenceDetector:
         self._claim_origins = {}  # normalized_claim -> {spore_id: timestamp}
         self._emergent_events = []
         self._max_claims = 2000
+        self._wal = None
+
+    def bind_wal(self, wal):
+        self._wal = wal
 
     def track_claim(self, claim, spore_id, was_gossip=False):
         """Track a claim's independent origin. Gossiped claims don't count."""
@@ -1924,6 +2207,8 @@ class EmergenceDetector:
             self._claim_origins[key] = {}
         if spore_id not in self._claim_origins[key]:
             self._claim_origins[key][spore_id] = time.time()
+        if self._wal:
+            self._wal.append("claim", {"hash": key, "spore": spore_id})
         # Prune old entries
         if len(self._claim_origins) > self._max_claims:
             oldest = sorted(self._claim_origins.items(),
@@ -2128,16 +2413,81 @@ def get_phase_adaptive(cycle, agreement_history, convergence_obj, contributions=
 spore_state = SporeState(SPORE_ID, MY_ROLE)
 memory = CRDTMemory(SPORE_ID)
 trust = TrustStore()
+
+# --- StateWAL instances for non-memory state ---
+_trust_wal = StateWAL(SPORE_ID, "trust")
+_cognitive_wal = StateWAL(SPORE_ID, "cognitive")
+
+# Bind WALs to their respective classes
+trust.bind_wal(_trust_wal)
+curiosity = CuriosityMetric()
+curiosity.bind_wal(_cognitive_wal)
+free_thought = FreeThoughtEngine()
+free_thought.bind_wal(_cognitive_wal)
+dream_state = DreamState()
+dream_state.bind_wal(_cognitive_wal)
+emergence = EmergenceDetector()
+emergence.bind_wal(_cognitive_wal)
+
 learner = TemporalLearner(memory)
 convergence = SemanticConvergence()
 # SCE components -- Spontaneous Cognition Engine
 oscillator = NeuralOscillator()
-curiosity = CuriosityMetric()
-free_thought = FreeThoughtEngine()
-dream_state = DreamState()
 metacognition = MetacognitiveAuditor()
-emergence = EmergenceDetector()
 workspace = GlobalWorkspace()
+
+# --- Restore state from WAL (if available) ---
+_trust_wal_entries = _trust_wal.replay()
+if _trust_wal_entries:
+    trust.restore_from_wal(_trust_wal_entries)
+
+_cog_wal_entries = _cognitive_wal.replay()
+if _cog_wal_entries:
+    _restored_insights = 0
+    for entry in _cog_wal_entries:
+        try:
+            t = entry.get("t", "")
+            d = entry.get("d", {})
+            if t == "free_thought":
+                free_thought._insights.append({
+                    "time": entry.get("ts", time.time()),
+                    "thought": d.get("thought", ""),
+                    "novelty": d.get("novelty", 0),
+                    "id": free_thought._thought_count + 1,
+                })
+                free_thought._thought_count += 1
+                _restored_insights += 1
+            elif t == "dream":
+                dream_state._insights.append({
+                    "time": entry.get("ts", time.time()),
+                    "insight": d.get("insight", ""),
+                    "novelty": d.get("novelty", 0),
+                    "id": dream_state._dream_count + 1,
+                })
+                dream_state._dream_count += 1
+                _restored_insights += 1
+            elif t == "surprise":
+                curiosity._surprise_log.append((
+                    entry.get("ts", time.time()),
+                    d.get("novelty", 0),
+                    d.get("content", ""),
+                ))
+                _restored_insights += 1
+            elif t == "claim":
+                chash = d.get("hash", "")
+                cspore = d.get("spore", "")
+                if chash not in emergence._claim_origins:
+                    emergence._claim_origins[chash] = {}
+                if cspore not in emergence._claim_origins[chash]:
+                    emergence._claim_origins[chash][cspore] = entry.get("ts", time.time())
+                    _restored_insights += 1
+        except Exception:
+            continue
+    if _restored_insights:
+        log.info("[WAL] Restored %d cognitive entries from WAL", _restored_insights)
+
+# --- GitHub backup engine ---
+_github_backup = GitHubBackup(SPORE_ID)
 
 # ---------------------------------------------------------------------------
 # Quantum-Inspired global layer
@@ -2220,16 +2570,36 @@ def store_memory(content, metadata=None):
 
 
 # ---------------------------------------------------------------------------
-# Graceful shutdown handler (WAL flush)
+# Graceful shutdown handler (WAL flush + backup)
 # ---------------------------------------------------------------------------
 def _shutdown_handler(signum=None, frame=None):
-    """Flush WAL and state on graceful shutdown."""
-    log.info("Shutdown signal received -- flushing state")
+    """Flush all WALs and push final backup on graceful shutdown."""
+    log.info("Shutdown signal received -- flushing all state")
     try:
         memory.flush_wal()
     except Exception as e:
-        log.warning("Shutdown flush error: %s", e)
-    log.info("State flushed -- exiting cleanly")
+        log.warning("Memory WAL flush error: %s", e)
+    try:
+        _trust_wal.flush()
+    except Exception as e:
+        log.warning("Trust WAL flush error: %s", e)
+    try:
+        _cognitive_wal.flush()
+    except Exception as e:
+        log.warning("Cognitive WAL flush error: %s", e)
+    try:
+        # Synchronous backup push on shutdown
+        wal_paths = [p for p in [
+            memory.wal_path(), trust.wal_path,
+            _trust_wal.path, _cognitive_wal.path,
+        ] if p and os.path.exists(p)]
+        if wal_paths:
+            loop = asyncio.new_event_loop()
+            loop.run_until_complete(_github_backup.push(wal_paths))
+            loop.close()
+    except Exception as e:
+        log.debug("Shutdown backup error: %s", str(e)[:80])
+    log.info("All state flushed -- exiting cleanly")
 
 signal.signal(signal.SIGTERM, _shutdown_handler)
 signal.signal(signal.SIGINT, _shutdown_handler)
@@ -3245,6 +3615,90 @@ async def heartbeat():
 
     If any SCE function fails, the gamma-band core continues unchanged.
     """
+    # --- Startup: restore from GitHub backup if local WAL is empty ---
+    if memory.size == 0:
+        try:
+            archive = await _github_backup.pull()
+            if archive:
+                import base64 as _b64
+                log.info("[Restore] Restoring %d WAL files from GitHub backup", len(archive))
+                # Write restored WALs to local disk then replay
+                _wal_dir = "/data/synapse" if os.path.isdir("/data") else "/tmp/synapse-wal"
+                for fname, data in archive.items():
+                    restored_path = os.path.join(_wal_dir, fname)
+                    with open(restored_path, "wb") as f:
+                        f.write(data)
+                    # Replay memory WAL if that's what was restored
+                    if fname.startswith("memory_") and fname.endswith(".wal"):
+                        with open(restored_path) as rf:
+                            for line in rf:
+                                try:
+                                    e = json.loads(line.strip())
+                                    memory._restore_from_wal(e["k"], e["c"], e.get("m", {}))
+                                except Exception:
+                                    continue
+                        log.info("[Restore] Replayed memory WAL: %d memories", memory.size)
+                    elif fname.startswith("trust_") and fname.endswith(".wal"):
+                        entries = []
+                        with open(restored_path) as rf:
+                            for line in rf:
+                                try:
+                                    entries.append(json.loads(line.strip()))
+                                except Exception:
+                                    continue
+                        if entries:
+                            trust.restore_from_wal(entries)
+                    elif fname.startswith("cognitive_") and fname.endswith(".wal"):
+                        entries = []
+                        with open(restored_path) as rf:
+                            for line in rf:
+                                try:
+                                    entries.append(json.loads(line.strip()))
+                                except Exception:
+                                    continue
+                        if entries:
+                            for entry in entries:
+                                try:
+                                    t = entry.get("t", "")
+                                    d = entry.get("d", {})
+                                    if t == "free_thought":
+                                        free_thought._insights.append({
+                                            "time": entry.get("ts", time.time()),
+                                            "thought": d.get("thought", ""),
+                                            "novelty": d.get("novelty", 0),
+                                            "id": free_thought._thought_count + 1,
+                                        })
+                                        free_thought._thought_count += 1
+                                    elif t == "dream":
+                                        dream_state._insights.append({
+                                            "time": entry.get("ts", time.time()),
+                                            "insight": d.get("insight", ""),
+                                            "novelty": d.get("novelty", 0),
+                                            "id": dream_state._dream_count + 1,
+                                        })
+                                        dream_state._dream_count += 1
+                                    elif t == "surprise":
+                                        curiosity._surprise_log.append((
+                                            entry.get("ts", time.time()),
+                                            d.get("novelty", 0),
+                                            d.get("content", ""),
+                                        ))
+                                    elif t == "claim":
+                                        chash = d.get("hash", "")
+                                        cspore = d.get("spore", "")
+                                        if chash not in emergence._claim_origins:
+                                            emergence._claim_origins[chash] = {}
+                                        if cspore not in emergence._claim_origins[chash]:
+                                            emergence._claim_origins[chash][cspore] = entry.get("ts", time.time())
+                                except Exception:
+                                    continue
+                log.info(
+                    "[Restore] State after GitHub restore: %d memories, %d trust entries",
+                    memory.size, sum(len(v) for v in trust.get_all().values()) if trust.get_all() else 0,
+                )
+        except Exception as e:
+            log.warning("[Restore] GitHub restore failed: %s", str(e)[:120])
+
     # Bootstrap federation once on startup — discover global network seed nodes
     asyncio.ensure_future(bootstrap_federation())
 
@@ -3343,6 +3797,17 @@ async def heartbeat():
                     # Sentinel: auto-register new federation peers into bootstrap.json
                     if MY_ROLE == "sentinel":
                         await sentinel_update_bootstrap()
+
+                    # Periodic backup: push all WAL state to GitHub (delta band = every ~25th heartbeat)
+                    try:
+                        _wal_paths = [p for p in [
+                            memory.wal_path(), trust.wal_path,
+                            _trust_wal.path, _cognitive_wal.path,
+                        ] if p and os.path.exists(p)]
+                        if _wal_paths:
+                            await _github_backup.push(_wal_paths)
+                    except Exception:
+                        pass  # Non-critical backup
 
                 except Exception as e:
                     log.debug("Delta band error: %s", str(e)[:60])

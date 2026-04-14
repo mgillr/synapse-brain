@@ -16,4 +16,5 @@ venv/
 data/
 *.wal
 .synapse-wal/
+.synapse-backup/
 .sentinel_cache/
