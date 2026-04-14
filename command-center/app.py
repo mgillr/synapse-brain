@@ -39,16 +39,22 @@ ROLE_COLORS = {
 PHASE_COLORS = {"DIVERGE": "#3b82f6", "DEEPEN": "#f59e0b", "CONVERGE": "#10b981", "SYNTHESIZE": "#8b5cf6"}
 
 # Shared sync HTTP client with connection pooling -- reused across all requests
+# retries=1: auto-retry on stale keepalive connections (uvicorn default keepalive=5s
+# means connections expire between polls; httpx retries with a fresh connection)
 _shared_client = None
+_client_lock = threading.Lock()
 
 def _get_client():
     global _shared_client
     if _shared_client is None or _shared_client.is_closed:
-        _shared_client = httpx.Client(
-            timeout=httpx.Timeout(5.0, connect=3.0),
-            limits=httpx.Limits(max_connections=20, max_keepalive_connections=10),
-            follow_redirects=True,
-        )
+        with _client_lock:
+            if _shared_client is None or _shared_client.is_closed:
+                _shared_client = httpx.Client(
+                    timeout=httpx.Timeout(5.0, connect=3.0),
+                    limits=httpx.Limits(max_connections=20, max_keepalive_connections=10),
+                    follow_redirects=True,
+                    transport=httpx.HTTPTransport(retries=1),
+                )
     return _shared_client
 
 
@@ -99,7 +105,7 @@ def _poll_node(nid, node):
     n_peers = len(node["peers"]) if isinstance(node["peers"], list) else (int(node["peers"]) if node["peers"] else 0)
     node["n_peers"] = n_peers
 
-    fed = safe_get(f"{node['url']}/api/federation/peers", timeout=5.0)
+    fed = safe_get(f"{node['url']}/api/federation/peers", timeout=5.0)  # served by spore.py
     new_peers = {}
     if fed and isinstance(fed, dict):
         for peer_id, peer_info in fed.items():
@@ -128,18 +134,21 @@ def discover_nodes():
     import concurrent.futures
     with concurrent.futures.ThreadPoolExecutor(max_workers=10) as pool:
         futures = {pool.submit(_poll_node, nid, node): nid for nid, node in list(nodes.items())}
-        for future in concurrent.futures.as_completed(futures, timeout=30):
-            try:
-                node, new_peers = future.result()
-                nodes[node["id"]] = node
-                for peer_id, peer_info in new_peers.items():
-                    if peer_id not in nodes:
-                        nodes[peer_id] = peer_info
-                        cmd = peer_info.get("commander", "unknown")
-                        if cmd not in commanders:
-                            commanders[cmd] = {"name": cmd, "color": "#6b7280", "sentinel": None}
-            except Exception:
-                pass
+        try:
+            for future in concurrent.futures.as_completed(futures, timeout=30):
+                try:
+                    node, new_peers = future.result()
+                    nodes[node["id"]] = node
+                    for peer_id, peer_info in new_peers.items():
+                        if peer_id not in nodes:
+                            nodes[peer_id] = peer_info
+                            cmd = peer_info.get("commander", "unknown")
+                            if cmd not in commanders:
+                                commanders[cmd] = {"name": cmd, "color": "#6b7280", "sentinel": None}
+                except Exception:
+                    pass
+        except concurrent.futures.TimeoutError:
+            pass  # write back whatever completed within the window
 
     with _registry["lock"]:
         _registry["nodes"] = nodes
@@ -430,9 +439,17 @@ def fetch_all_tasks():
     """Fetch tasks from all online nodes in PARALLEL."""
     all_nodes = list(get_all_nodes().values())[:20]
     import concurrent.futures
+    results = []
     with concurrent.futures.ThreadPoolExecutor(max_workers=10) as pool:
         futures = [pool.submit(_fetch_node_tasks, n) for n in all_nodes]
-        results = [f.result() for f in concurrent.futures.as_completed(futures, timeout=30)]
+        try:
+            for f in concurrent.futures.as_completed(futures, timeout=30):
+                try:
+                    results.append(f.result())
+                except Exception:
+                    pass
+        except concurrent.futures.TimeoutError:
+            pass
 
     merged = {}
     for r in results:
@@ -454,9 +471,17 @@ def fetch_task_detail(task_id):
     """Fetch task detail from all nodes in PARALLEL."""
     all_nodes = list(get_all_nodes().values())[:20]
     import concurrent.futures
+    results = []
     with concurrent.futures.ThreadPoolExecutor(max_workers=10) as pool:
         futures = [pool.submit(_fetch_node_detail, n, task_id) for n in all_nodes]
-        results = [f.result() for f in concurrent.futures.as_completed(futures, timeout=30)]
+        try:
+            for f in concurrent.futures.as_completed(futures, timeout=30):
+                try:
+                    results.append(f.result())
+                except Exception:
+                    pass
+        except concurrent.futures.TimeoutError:
+            pass
 
     best = None
     longest_answer = ""

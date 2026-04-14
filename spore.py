@@ -4907,6 +4907,26 @@ async def api_health():
     })
 
 
+@api.get("/api/federation/peers")
+async def api_federation_peers():
+    """Return active federation peers keyed by node_id for CC dynamic discovery.
+
+    The CC polls this endpoint to learn about federation nodes beyond the
+    hardcoded CORE_SPORES list. Returns a dict so CC can iterate peer_id → info.
+    """
+    peers = {}
+    if federation:
+        for node in federation.nodes.values():
+            if node.is_active():
+                peers[node.node_id] = {
+                    "url": node.endpoint,
+                    "role": node.role,
+                    "model": "",  # federation registry does not track model
+                    "commander": "default",
+                }
+    return JSONResponse(peers)
+
+
 # --- Pre-computed dashboard cache for CC ---
 _dashboard_cache = {"data": {}, "updated": 0}
 _DASHBOARD_TTL = 10  # seconds
@@ -4918,12 +4938,13 @@ def _rebuild_dashboard_cache():
     fed_peers = {}
     if federation:
         try:
+            # all_nodes() returns list of dicts (from FederationNode.to_dict())
             for node in federation.all_nodes():
-                fed_peers[getattr(node, "spore_id", "?")] = {
-                    "url": getattr(node, "endpoint", ""),
-                    "role": getattr(node, "role", ""),
-                    "model": getattr(node, "model", ""),
-                    "commander": getattr(node, "operator", "unknown"),
+                fed_peers[node.get("node_id", "?")] = {
+                    "url": node.get("endpoint", ""),
+                    "role": node.get("role", ""),
+                    "model": node.get("model", ""),
+                    "commander": node.get("operator", "unknown"),
                 }
         except Exception:
             pass
