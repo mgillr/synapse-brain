@@ -10,16 +10,87 @@ from collections import defaultdict
 HF_TOKEN = os.environ.get("HF_TOKEN", "")
 HEADERS = {"Authorization": f"Bearer {HF_TOKEN}"} if HF_TOKEN else {}
 
-# Core spores -- bootstrap. Federation nodes discovered dynamically.
-CORE_SPORES = [
-    {"id": "000", "url": "https://<your-prefix>-synapse-spore-000.hf.space", "role": "Explorer", "model": "Qwen3 235B MoE", "color": "#3b82f6", "commander": "default"},
-    {"id": "001", "url": "https://<your-prefix>-synapse-spore-001.hf.space", "role": "Synthesizer", "model": "Llama 3.3 70B", "color": "#8b5cf6", "commander": "default"},
-    {"id": "002", "url": "https://<your-prefix>-synapse-spore-002.hf.space", "role": "Adversarial", "model": "DeepSeek R1 32B", "color": "#ef4444", "commander": "default"},
-    {"id": "003", "url": "https://<your-prefix>-synapse-spore-003.hf.space", "role": "Validator", "model": "Gemma 3 27B", "color": "#f59e0b", "commander": "default"},
-    {"id": "004", "url": "https://<your-prefix>-synapse-spore-004.hf.space", "role": "Generalist", "model": "Llama 4 Scout 17B", "color": "#10b981", "commander": "default"},
-    {"id": "005", "url": "https://<your-prefix>-synapse-spore-005.hf.space", "role": "Brain", "model": "GLM-4.7-Flash", "color": "#ec4899", "commander": "default"},
-    {"id": "006", "url": "https://<your-prefix>-synapse-spore-006.hf.space", "role": "Sentinel", "model": "DeepSeek R1 671B", "color": "#f97316", "commander": "default"},
+# Bootstrap URL for cross-cluster discovery (injected by launch_swarm.py).
+BOOTSTRAP_URL = os.environ.get(
+    "BOOTSTRAP_URL",
+    "https://raw.githubusercontent.com/mgillr/synapse-brain/main/bootstrap.json",
+)
+
+# Default role/model template per spore index (used to fill out URL-only env input).
+_SPORE_TEMPLATE = [
+    ("Explorer",     "Qwen3 235B MoE",      "#3b82f6"),
+    ("Synthesizer",  "Llama 3.3 70B",       "#8b5cf6"),
+    ("Adversarial",  "DeepSeek R1 32B",     "#ef4444"),
+    ("Validator",    "Gemma 3 27B",         "#f59e0b"),
+    ("Generalist",   "Llama 4 Scout 17B",   "#10b981"),
+    ("Brain",        "GLM-4.7-Flash",       "#ec4899"),
+    ("Sentinel",     "DeepSeek R1 671B",    "#f97316"),
 ]
+
+
+def _build_core_spores():
+    """Build CORE_SPORES from env vars (set by launch_swarm.py) or fall back to placeholders.
+
+    Resolution order:
+      1. SYNAPSE_SPORES env var (JSON list of URL strings)
+      2. SPORE_URLS env var (newline/comma-separated URL list)
+      3. HF_OWNER + SPORE_PREFIX env vars → derive {owner}-{prefix}-NNN.hf.space
+      4. Placeholder URLs (will not resolve -- visible warning state)
+    """
+    urls = []
+
+    raw = os.environ.get("SYNAPSE_SPORES", "").strip()
+    if raw:
+        try:
+            data = json.loads(raw)
+            if isinstance(data, list):
+                urls = [str(u).strip().rstrip("/") for u in data if u]
+        except Exception:
+            pass
+
+    if not urls:
+        raw = os.environ.get("SPORE_URLS", "").strip()
+        if raw:
+            for line in raw.replace(",", "\n").splitlines():
+                line = line.strip().rstrip("/")
+                if line:
+                    urls.append(line)
+
+    if not urls:
+        owner = os.environ.get("HF_OWNER", "").strip().lower()
+        prefix = os.environ.get("SPORE_PREFIX", "synapse-spore").strip()
+        count = int(os.environ.get("SPORE_COUNT", "7") or "7")
+        if owner:
+            urls = [f"https://{owner}-{prefix}-{i:03d}.hf.space" for i in range(count)]
+
+    if not urls:
+        # Last resort: visible placeholders so users see the misconfiguration in the UI.
+        urls = [f"https://your-prefix-synapse-spore-{i:03d}.hf.space" for i in range(7)]
+
+    spores = []
+    for i, url in enumerate(urls):
+        role, model, color = _SPORE_TEMPLATE[i % len(_SPORE_TEMPLATE)]
+        # Try to extract a stable id from the URL (last 3 digits of the spore name).
+        sid = f"{i:03d}"
+        try:
+            tail = url.rsplit("-", 1)[-1].split(".", 1)[0]
+            if tail.isdigit():
+                sid = tail
+        except Exception:
+            pass
+        spores.append({
+            "id": sid,
+            "url": url,
+            "role": role,
+            "model": model,
+            "color": color,
+            "commander": "default",
+        })
+    return spores
+
+
+# Core spores -- bootstrap. Federation nodes discovered dynamically.
+CORE_SPORES = _build_core_spores()
 
 # Dynamic registry -- populated at runtime from gossip + federation
 _registry = {
@@ -38,9 +109,14 @@ ROLE_COLORS = {
 
 PHASE_COLORS = {"DIVERGE": "#3b82f6", "DEEPEN": "#f59e0b", "CONVERGE": "#10b981", "SYNTHESIZE": "#8b5cf6"}
 
-# Shared sync HTTP client with connection pooling -- reused across all requests
-# retries=1: auto-retry on stale keepalive connections (uvicorn default keepalive=5s
-# means connections expire between polls; httpx retries with a fresh connection)
+# Shared sync HTTP client -- KEEPALIVE DISABLED.
+# CC polls every 15-60s; uvicorn's default keepalive_timeout is 5s, so any pooled
+# connection will be silently closed by the server between polls. The next request
+# on that pooled connection raises RemoteProtocolError ("Server disconnected without
+# sending a response"), which httpx.HTTPTransport(retries=N) does NOT retry (retries
+# only fires on connect-level failures, not protocol errors mid-request).
+# Fix: max_keepalive_connections=0 forces a fresh TCP connection per request.
+# We ALSO wrap requests in safe_get/safe_post with an explicit retry loop as belt+braces.
 _shared_client = None
 _client_lock = threading.Lock()
 
@@ -50,12 +126,24 @@ def _get_client():
         with _client_lock:
             if _shared_client is None or _shared_client.is_closed:
                 _shared_client = httpx.Client(
-                    timeout=httpx.Timeout(5.0, connect=3.0),
-                    limits=httpx.Limits(max_connections=20, max_keepalive_connections=10),
+                    timeout=httpx.Timeout(8.0, connect=4.0),
+                    limits=httpx.Limits(max_connections=20, max_keepalive_connections=0),
                     follow_redirects=True,
-                    transport=httpx.HTTPTransport(retries=1),
+                    transport=httpx.HTTPTransport(retries=2),
                 )
     return _shared_client
+
+
+def _reset_client():
+    """Drop the shared client so the next request opens a fresh pool."""
+    global _shared_client
+    with _client_lock:
+        if _shared_client is not None:
+            try:
+                _shared_client.close()
+            except Exception:
+                pass
+            _shared_client = None
 
 
 def esc(text):
@@ -63,24 +151,41 @@ def esc(text):
 
 
 def safe_get(url, timeout=8):
-    try:
-        client = _get_client()
-        r = client.get(url, headers=HEADERS, timeout=timeout)
-        if r.status_code == 200:
-            return r.json()
-    except Exception:
-        pass
+    """GET with one retry on protocol/network errors (stale keepalive defence-in-depth)."""
+    last_err = None
+    for attempt in range(2):
+        try:
+            client = _get_client()
+            r = client.get(url, headers=HEADERS, timeout=timeout)
+            if r.status_code == 200:
+                return r.json()
+            return None  # non-2xx is a real "no data", not retryable
+        except (httpx.RemoteProtocolError, httpx.ReadError, httpx.ConnectError,
+                httpx.PoolTimeout, httpx.ReadTimeout) as e:
+            last_err = e
+            _reset_client()  # nuke pool on transport error
+            continue
+        except Exception:
+            return None
     return None
 
 
 def safe_post(url, data, timeout=15):
-    try:
-        client = _get_client()
-        r = client.post(url, json=data, headers=HEADERS, timeout=timeout)
-        if r.status_code == 200:
-            return r.json()
-    except Exception:
-        pass
+    last_err = None
+    for attempt in range(2):
+        try:
+            client = _get_client()
+            r = client.post(url, json=data, headers=HEADERS, timeout=timeout)
+            if r.status_code == 200:
+                return r.json()
+            return None
+        except (httpx.RemoteProtocolError, httpx.ReadError, httpx.ConnectError,
+                httpx.PoolTimeout, httpx.ReadTimeout) as e:
+            last_err = e
+            _reset_client()
+            continue
+        except Exception:
+            return None
     return None
 
 
