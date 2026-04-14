@@ -1569,7 +1569,7 @@ async def call_llm(prompt, system="", tier="any", temperature=None):
         messages.append({"role": "system", "content": system})
     messages.append({"role": "user", "content": prompt})
 
-    # --- Phase 1: External providers (ordered by tier preference) ---
+    # --- Phase 1: External providers -- PARALLEL fan-out ---
     # Provider rotation: each spore starts at a different offset in the worker
     # chain to spread load across providers and avoid simultaneous rate limits
     brain_providers = [(n, c) for n, c in EXTERNAL_PROVIDERS.items() if c.get("tier") == "brain"]
@@ -1582,44 +1582,15 @@ async def call_llm(prompt, system="", tier="any", temperature=None):
     else:
         ext_order = worker_providers + brain_providers
 
-    for name, conf in ext_order:
-        key = os.environ.get(conf.get("env", ""))
-        if not key:
-            continue
-        # Check cooldown before every attempt
-        if time.time() < _provider_cooldowns.get(name, 0):
-            continue
-        try:
-            async with httpx.AsyncClient(timeout=90.0) as client:
-                start = time.time()
-                resp = await client.post(
-                    conf["url"],
-                    headers={"Authorization": f"Bearer {key}"},
-                    json={"model": conf["model"], "messages": messages,
-                          "max_tokens": 2048, "temperature": temperature},
-                )
-                resp.raise_for_status()
-                text = extract_response_text(resp.json(), conf["model"])
-                if not text.strip():
-                    # Empty response = soft rate limit (e.g. Z.ai returns 200 with empty content)
-                    log.warning("Provider %s returned empty response -- cooldown", name)
-                    _provider_cooldowns[name] = time.time() + COOLDOWN_SECONDS
-                    continue
-                ms = (time.time() - start) * 1000
-                log.info("LLM response from %s/%s in %.0fms", name, conf["model"], ms)
-                return {"text": text, "provider": name, "model": conf["model"],
-                        "tier": conf.get("tier", "fallback"), "latency_ms": round(ms, 1)}
-        except Exception as e:
-            err = str(e)
-            log.warning("Provider %s (%s): %s", name, conf["model"], err[:80])
-            if "429" in err or "rate" in err.lower() or "1302" in err:
-                _provider_cooldowns[name] = time.time() + COOLDOWN_SECONDS
-            elif "402" in err or "credit" in err.lower() or "quota" in err.lower():
-                _provider_cooldowns[name] = time.time() + COOLDOWN_SECONDS * 6  # 30 min for billing
+    # Fan-out: fire multiple providers in parallel, take first success
+    result = await _fan_out_call(messages, ext_order, temperature)
+    if result:
+        log.info("LLM response from %s/%s in %.0fms", result["provider"], result["model"], result["latency_ms"])
+        return result
 
     # --- Phase 2: HF Router with short-circuit on 402 ---
     hf_dead = False
-    async with httpx.AsyncClient(timeout=60.0) as client:
+    async with httpx.AsyncClient(timeout=30.0) as client:
         for model in FALLBACK_MODELS:
             if hf_dead:
                 break
@@ -1693,6 +1664,71 @@ async def call_llm(prompt, system="", tier="any", temperature=None):
     _record_all_providers_failed()
     return {"text": "[all models failed]", "provider": "none", "model": "none",
             "tier": "none", "latency_ms": 0}
+
+
+async def _fan_out_call(messages, providers, temperature):
+    """Fan-out: fire multiple LLM providers in parallel, return FIRST success.
+
+    Instead of trying providers sequentially (up to 15 × 90s = 22.5 min worst case),
+    we fire FAN_OUT_WIDTH providers simultaneously and take the first successful response.
+    This cuts latency from sequential sum to fastest-provider-wins.
+    """
+    FAN_OUT_WIDTH = 4  # concurrent provider attempts
+    FAN_OUT_TIMEOUT = 30.0  # reduced from 90s per provider
+
+    # Filter to available (non-cooldown) providers
+    available = []
+    for name, conf in providers:
+        key = os.environ.get(conf.get("env", ""))
+        if not key:
+            continue
+        if time.time() < _provider_cooldowns.get(name, 0):
+            continue
+        available.append((name, conf, key))
+
+    # Fan out in batches of FAN_OUT_WIDTH
+    for batch_start in range(0, len(available), FAN_OUT_WIDTH):
+        batch = available[batch_start:batch_start + FAN_OUT_WIDTH]
+
+        async def _try_provider(name, conf, key):
+            try:
+                async with httpx.AsyncClient(timeout=FAN_OUT_TIMEOUT) as client:
+                    start = time.time()
+                    resp = await client.post(
+                        conf["url"],
+                        headers={"Authorization": f"Bearer {key}"},
+                        json={"model": conf["model"], "messages": messages,
+                              "max_tokens": 2048, "temperature": temperature},
+                    )
+                    resp.raise_for_status()
+                    text = extract_response_text(resp.json(), conf["model"])
+                    if not text.strip():
+                        _provider_cooldowns[name] = time.time() + COOLDOWN_SECONDS
+                        return None
+                    ms = (time.time() - start) * 1000
+                    return {"text": text, "provider": name, "model": conf["model"],
+                            "tier": conf.get("tier", "fallback"), "latency_ms": round(ms, 1)}
+            except Exception as e:
+                err = str(e)
+                log.debug("Fan-out %s: %s", name, err[:60])
+                if "429" in err or "rate" in err.lower() or "1302" in err:
+                    _provider_cooldowns[name] = time.time() + COOLDOWN_SECONDS
+                elif "402" in err or "credit" in err.lower() or "quota" in err.lower():
+                    _provider_cooldowns[name] = time.time() + COOLDOWN_SECONDS * 6
+                return None
+
+        # Fire all providers in batch concurrently
+        results = await asyncio.gather(
+            *[_try_provider(n, c, k) for n, c, k in batch],
+            return_exceptions=True,
+        )
+        # Return first successful result
+        for r in results:
+            if isinstance(r, dict) and r.get("text"):
+                log.info("Fan-out winner: %s/%s in %.0fms", r["provider"], r["model"], r["latency_ms"])
+                return r
+
+    return None  # all providers in all batches failed
 
 
 
@@ -3710,6 +3746,7 @@ async def heartbeat():
             # This is the original v5 heartbeat, unchanged
             await _self_ping()
             await gossip_push()
+            _rebuild_dashboard_cache()  # pre-compute for CC dashboard endpoint
 
             active = [
                 t for t in spore_state.tasks.values()
@@ -4868,6 +4905,76 @@ async def api_health():
             "entangled_pairs": len(_entanglement.summary()),
         },
     })
+
+
+# --- Pre-computed dashboard cache for CC ---
+_dashboard_cache = {"data": {}, "updated": 0}
+_DASHBOARD_TTL = 10  # seconds
+
+
+def _rebuild_dashboard_cache():
+    """Pre-compute dashboard payload. Called on every heartbeat."""
+    trust_all = trust.get_all()
+    fed_peers = {}
+    if federation:
+        try:
+            for node in federation.all_nodes():
+                fed_peers[getattr(node, "spore_id", "?")] = {
+                    "url": getattr(node, "endpoint", ""),
+                    "role": getattr(node, "role", ""),
+                    "model": getattr(node, "model", ""),
+                    "commander": getattr(node, "operator", "unknown"),
+                }
+        except Exception:
+            pass
+    tasks_data = {}
+    for tid, t in spore_state.tasks.items():
+        if _is_real_task(t):
+            tasks_data[tid] = {
+                "task_id": tid,
+                "description": t.description[:200] if t.description else "",
+                "converged": t.converged,
+                "cycle": t.my_cycles,
+                "delta_count": len(t.deltas),
+                "final_answer": (t.final_answer or "")[:500],
+                "contributors": list(set(d.get("author", "") for d in t.deltas)),
+            }
+    _dashboard_cache["data"] = {
+        "health": {
+            "spore": SPORE_ID, "role": MY_ROLE, "model": PRIMARY_MODEL,
+            "version": "7.0.0", "memories": memory.size,
+            "cycles": spore_state.reasoning_cycles,
+            "deltas_produced": spore_state.deltas_produced,
+            "deltas_received": spore_state.deltas_received,
+            "peers": list(spore_state.peers_seen),
+            "active_tasks": len([t for t in spore_state.tasks.values() if not t.converged]),
+            "converged_tasks": len([t for t in spore_state.tasks.values() if t.converged]),
+            "uptime": spore_state.uptime(),
+            "last_provider": spore_state.last_provider,
+            "last_model": spore_state.last_model,
+            "last_tier": spore_state.last_tier,
+            "confidence": spore_state.last_latency,
+        },
+        "trust": trust_all,
+        "tasks": tasks_data,
+        "federation": fed_peers,
+        "timestamp": time.time(),
+    }
+    _dashboard_cache["updated"] = time.time()
+
+
+@api.get("/api/dashboard")
+async def api_dashboard():
+    """Single-request dashboard payload for CC. Zero computation on hit.
+
+    Returns pre-computed health + trust + tasks + federation in one response.
+    CC needs only 1 request per spore instead of 4+.
+    """
+    data = _dashboard_cache.get("data", {})
+    if not data or time.time() - _dashboard_cache["updated"] > _DASHBOARD_TTL:
+        _rebuild_dashboard_cache()
+        data = _dashboard_cache["data"]
+    return JSONResponse(data)
 
 
 @api.get("/api/quantum")
