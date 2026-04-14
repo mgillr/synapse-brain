@@ -4,7 +4,6 @@ Designed for 7 to 70,000 nodes. Compact topology view, fractal sentinel
 mesh monitoring, searchable node browser, aggregate trust heatmap.
 """
 import os, json, time, httpx, gradio as gr, threading, html as html_mod
-import asyncio
 from datetime import datetime
 from collections import defaultdict
 
@@ -39,13 +38,13 @@ ROLE_COLORS = {
 
 PHASE_COLORS = {"DIVERGE": "#3b82f6", "DEEPEN": "#f59e0b", "CONVERGE": "#10b981", "SYNTHESIZE": "#8b5cf6"}
 
-# Shared async HTTP client with connection pooling -- reused across all requests
+# Shared sync HTTP client with connection pooling -- reused across all requests
 _shared_client = None
 
 def _get_client():
     global _shared_client
     if _shared_client is None or _shared_client.is_closed:
-        _shared_client = httpx.AsyncClient(
+        _shared_client = httpx.Client(
             timeout=httpx.Timeout(5.0, connect=3.0),
             limits=httpx.Limits(max_connections=20, max_keepalive_connections=10),
             follow_redirects=True,
@@ -59,7 +58,8 @@ def esc(text):
 
 def safe_get(url, timeout=8):
     try:
-        r = httpx.get(url, headers=HEADERS, timeout=timeout, follow_redirects=True)
+        client = _get_client()
+        r = client.get(url, headers=HEADERS, timeout=timeout)
         if r.status_code == 200:
             return r.json()
     except Exception:
@@ -69,19 +69,8 @@ def safe_get(url, timeout=8):
 
 def safe_post(url, data, timeout=15):
     try:
-        r = httpx.post(url, json=data, headers=HEADERS, timeout=timeout, follow_redirects=True)
-        if r.status_code == 200:
-            return r.json()
-    except Exception:
-        pass
-    return None
-
-
-async def _async_safe_get(url, timeout=5.0):
-    """Fast async GET with connection pooling."""
-    try:
         client = _get_client()
-        r = await client.get(url, headers=HEADERS, timeout=timeout)
+        r = client.post(url, json=data, headers=HEADERS, timeout=timeout)
         if r.status_code == 200:
             return r.json()
     except Exception:
@@ -90,11 +79,12 @@ async def _async_safe_get(url, timeout=5.0):
 
 
 # -------------------------------------------------------------------
-#  NODE DISCOVERY -- PARALLEL async polling
+#  NODE DISCOVERY -- PARALLEL thread-based polling (Gradio-safe)
 # -------------------------------------------------------------------
-async def _poll_node(nid, node):
-    """Poll a single node for health + federation. Returns updated node dict."""
-    health = await _async_safe_get(f"{node['url']}/api/health", timeout=5.0)
+def _poll_node(nid, node):
+    """Poll a single node for health + federation. Thread-safe."""
+    node = dict(node)
+    health = safe_get(f"{node['url']}/api/health", timeout=10.0)
     if not health:
         node["online"] = False
         return node, {}
@@ -106,11 +96,10 @@ async def _poll_node(nid, node):
     node["confidence"] = health.get("confidence", 0)
     node["tier"] = health.get("last_tier", health.get("tier", "worker"))
     node["peers"] = health.get("peers", health.get("connected_peers", []))
-    n_peers = len(node["peers"]) if isinstance(node["peers"], list) else int(node["peers"]) if node["peers"] else 0
+    n_peers = len(node["peers"]) if isinstance(node["peers"], list) else (int(node["peers"]) if node["peers"] else 0)
     node["n_peers"] = n_peers
 
-    # Discover federation peers in parallel with health
-    fed = await _async_safe_get(f"{node['url']}/api/federation/peers", timeout=3.0)
+    fed = safe_get(f"{node['url']}/api/federation/peers", timeout=5.0)
     new_peers = {}
     if fed and isinstance(fed, dict):
         for peer_id, peer_info in fed.items():
@@ -126,7 +115,7 @@ async def _poll_node(nid, node):
 
 
 def discover_nodes():
-    """Poll all known nodes in PARALLEL. 7x faster than sequential."""
+    """Poll all known nodes in PARALLEL using threads. Gradio-safe."""
     now = time.time()
     with _registry["lock"]:
         if now - _registry["last_discovery"] < 15:
@@ -136,45 +125,25 @@ def discover_nodes():
     nodes = dict(_registry["nodes"])
     commanders = dict(_registry["commanders"])
 
-    try:
-        loop = asyncio.get_event_loop()
-        if loop.is_running():
-            # Gradio already has an event loop -- run in thread
-            import concurrent.futures
-            with concurrent.futures.ThreadPoolExecutor() as pool:
-                result = pool.submit(asyncio.run, _discover_nodes_parallel(nodes)).result()
-        else:
-            result = loop.run_until_complete(_discover_nodes_parallel(nodes))
-    except Exception:
-        result = nodes, commanders
+    import concurrent.futures
+    with concurrent.futures.ThreadPoolExecutor(max_workers=10) as pool:
+        futures = {pool.submit(_poll_node, nid, node): nid for nid, node in list(nodes.items())}
+        for future in concurrent.futures.as_completed(futures, timeout=30):
+            try:
+                node, new_peers = future.result()
+                nodes[node["id"]] = node
+                for peer_id, peer_info in new_peers.items():
+                    if peer_id not in nodes:
+                        nodes[peer_id] = peer_info
+                        cmd = peer_info.get("commander", "unknown")
+                        if cmd not in commanders:
+                            commanders[cmd] = {"name": cmd, "color": "#6b7280", "sentinel": None}
+            except Exception:
+                pass
 
     with _registry["lock"]:
-        _registry["nodes"] = result[0]
-        _registry["commanders"] = result[1]
-
-
-async def _discover_nodes_parallel(nodes):
-    """Async parallel discovery of all nodes."""
-    tasks = []
-    for nid, node in list(nodes.items()):
-        tasks.append(_poll_node(nid, dict(node)))
-
-    results = await asyncio.gather(*tasks, return_exceptions=True)
-
-    commanders = dict(_registry["commanders"])
-    for result in results:
-        if isinstance(result, Exception):
-            continue
-        node, new_peers = result
-        nodes[node["id"]] = node
-        for peer_id, peer_info in new_peers.items():
-            if peer_id not in nodes:
-                nodes[peer_id] = peer_info
-                cmd = peer_info.get("commander", "unknown")
-                if cmd not in commanders:
-                    commanders[cmd] = {"name": cmd, "color": "#6b7280", "sentinel": None}
-
-    return nodes, commanders
+        _registry["nodes"] = nodes
+        _registry["commanders"] = commanders
 
 
 def get_all_nodes():
@@ -434,13 +403,13 @@ def _resolve_trust_val(t, spore_id):
 
 
 # -------------------------------------------------------------------
-#  TASK FETCHING -- parallel async
+#  TASK FETCHING -- parallel thread-based
 # -------------------------------------------------------------------
-async def _fetch_node_tasks(node):
+def _fetch_node_tasks(node):
     """Fetch tasks from a single node."""
     if not node.get("online", True):
         return {}
-    raw = await _async_safe_get(f"{node['url']}/api/tasks", timeout=5.0)
+    raw = safe_get(f"{node['url']}/api/tasks", timeout=10.0)
     if not raw:
         return {}
     result = {}
@@ -460,25 +429,14 @@ async def _fetch_node_tasks(node):
 def fetch_all_tasks():
     """Fetch tasks from all online nodes in PARALLEL."""
     all_nodes = list(get_all_nodes().values())[:20]
-    try:
-        loop = asyncio.get_event_loop()
-        if loop.is_running():
-            import concurrent.futures
-            with concurrent.futures.ThreadPoolExecutor() as pool:
-                results = pool.submit(
-                    asyncio.run,
-                    asyncio.gather(*[_fetch_node_tasks(n) for n in all_nodes], return_exceptions=True)
-                ).result()
-        else:
-            results = loop.run_until_complete(
-                asyncio.gather(*[_fetch_node_tasks(n) for n in all_nodes], return_exceptions=True)
-            )
-    except Exception:
-        return {}
+    import concurrent.futures
+    with concurrent.futures.ThreadPoolExecutor(max_workers=10) as pool:
+        futures = [pool.submit(_fetch_node_tasks, n) for n in all_nodes]
+        results = [f.result() for f in concurrent.futures.as_completed(futures, timeout=30)]
 
     merged = {}
     for r in results:
-        if isinstance(r, Exception) or not isinstance(r, dict):
+        if not isinstance(r, dict):
             continue
         for tid, tdata in r.items():
             if tid not in merged or (tdata.get("delta_count", 0) > merged[tid].get("delta_count", 0)):
@@ -486,35 +444,24 @@ def fetch_all_tasks():
     return merged
 
 
-async def _fetch_node_detail(node, task_id):
+def _fetch_node_detail(node, task_id):
     if not node.get("online", True):
         return None
-    return await _async_safe_get(f"{node['url']}/api/task/{task_id}", timeout=5.0)
+    return safe_get(f"{node['url']}/api/task/{task_id}", timeout=10.0)
 
 
 def fetch_task_detail(task_id):
     """Fetch task detail from all nodes in PARALLEL."""
     all_nodes = list(get_all_nodes().values())[:20]
-    try:
-        loop = asyncio.get_event_loop()
-        if loop.is_running():
-            import concurrent.futures
-            with concurrent.futures.ThreadPoolExecutor() as pool:
-                results = pool.submit(
-                    asyncio.run,
-                    asyncio.gather(*[_fetch_node_detail(n, task_id) for n in all_nodes], return_exceptions=True)
-                ).result()
-        else:
-            results = loop.run_until_complete(
-                asyncio.gather(*[_fetch_node_detail(n, task_id) for n in all_nodes], return_exceptions=True)
-            )
-    except Exception:
-        return None
+    import concurrent.futures
+    with concurrent.futures.ThreadPoolExecutor(max_workers=10) as pool:
+        futures = [pool.submit(_fetch_node_detail, n, task_id) for n in all_nodes]
+        results = [f.result() for f in concurrent.futures.as_completed(futures, timeout=30)]
 
     best = None
     longest_answer = ""
     for detail in results:
-        if isinstance(detail, Exception) or not detail:
+        if not detail:
             continue
         deltas = detail.get("deltas", [])
         if best is None or len(deltas) > len(best.get("deltas", [])):
