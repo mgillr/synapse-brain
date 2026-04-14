@@ -28,16 +28,19 @@ private: true
 # Free signup links:
 #   Z.ai:       https://open.bigmodel.cn/       (GLM-4 thinking models, daily limit)
 #   xAI Grok:   https://console.x.ai/           (Grok-3-mini, thinking model, fast)
-#   OpenRouter: https://openrouter.ai/          (27+ free models, per-model limits)
+#   OpenRouter: https://openrouter.ai/          (13+ free models, per-model limits)
 #   Google AI:  https://aistudio.google.com/    (Gemini 2.5 Flash, 15 req/min)
 #   LLM API:    https://llmapi.com/             (Llama-4-Maverick, worker tier)
 #
-# The swarm uses multiple OpenRouter free models as separate
-# rate-limit buckets. One OpenRouter key gives you 5+ providers.
+# OpenRouter gives 13 independent rate-limit buckets from one key:
+#   Nemotron-120B, GPT-OSS-120B, Trinity Large, Gemma 3 4B,
+#   Gemma 3N 4B, Step 3.5 Flash, GLM 4.5 Air, Qwen3 235B,
+#   Llama 3.3 70B, Trinity Mini, Solar Pro 3, Gemma 3 27B,
+#   Nemotron Nano 9B
 api_keys:
   zai: ""              # Primary brain tier -- GLM thinking models
   xai: ""              # xAI Grok-3-mini brain tier (thinking model)
-  openrouter: ""       # 5 free models with independent rate limits
+  openrouter: ""       # 13 free models with independent rate limits
   google_ai: ""        # Reserve -- Gemini 2.5 Flash
   llmapi: ""           # LLM API -- Llama-4-Maverick worker tier
 

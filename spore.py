@@ -184,8 +184,9 @@ EXTERNAL_PROVIDERS = {
         "model": "glm-4.5-flash",
         "tier": "brain",
     },
-    # --- Worker tier: 5 independent OpenRouter free models ---
+    # --- Worker tier: 13 independent OpenRouter free models ---
     # Each model has its own rate limit; spore rotation spreads load
+    # 13 models x independent limits = massive redundancy
     "or_nemotron120b": {
         "env": "OPENROUTER_KEY",
         "url": "https://openrouter.ai/api/v1/chat/completions",
@@ -214,6 +215,54 @@ EXTERNAL_PROVIDERS = {
         "env": "OPENROUTER_KEY",
         "url": "https://openrouter.ai/api/v1/chat/completions",
         "model": "google/gemma-3n-e4b-it:free",
+        "tier": "worker",
+    },
+    "or_step35_flash": {
+        "env": "OPENROUTER_KEY",
+        "url": "https://openrouter.ai/api/v1/chat/completions",
+        "model": "stepfun/step-3.5-flash:free",
+        "tier": "worker",
+    },
+    "or_glm45_air": {
+        "env": "OPENROUTER_KEY",
+        "url": "https://openrouter.ai/api/v1/chat/completions",
+        "model": "z-ai/glm-4.5-air:free",
+        "tier": "worker",
+    },
+    "or_qwen3_235b": {
+        "env": "OPENROUTER_KEY",
+        "url": "https://openrouter.ai/api/v1/chat/completions",
+        "model": "qwen/qwen3-235b-a22b-thinking:free",
+        "tier": "worker",
+    },
+    "or_llama33_70b": {
+        "env": "OPENROUTER_KEY",
+        "url": "https://openrouter.ai/api/v1/chat/completions",
+        "model": "meta-llama/llama-3.3-70b-instruct:free",
+        "tier": "worker",
+    },
+    "or_trinity_mini": {
+        "env": "OPENROUTER_KEY",
+        "url": "https://openrouter.ai/api/v1/chat/completions",
+        "model": "arcee-ai/trinity-mini:free",
+        "tier": "worker",
+    },
+    "or_solar_pro3": {
+        "env": "OPENROUTER_KEY",
+        "url": "https://openrouter.ai/api/v1/chat/completions",
+        "model": "upstage/solar-pro-3:free",
+        "tier": "worker",
+    },
+    "or_gemma3_27b": {
+        "env": "OPENROUTER_KEY",
+        "url": "https://openrouter.ai/api/v1/chat/completions",
+        "model": "google/gemma-3-27b-it:free",
+        "tier": "worker",
+    },
+    "or_nemotron_nano": {
+        "env": "OPENROUTER_KEY",
+        "url": "https://openrouter.ai/api/v1/chat/completions",
+        "model": "nvidia/nemotron-nano-9b-v2:free",
         "tier": "worker",
     },
     # --- xAI Grok (thinking model, brain tier) ---
