@@ -274,8 +274,10 @@ def generate_spore_app(
         "crdt-merge>=0.9.5\n"
         "httpx>=0.27\n"
         "numpy>=1.24\n"
+        "scikit-learn>=1.3\n"
         "fastapi>=0.115\n"
         "uvicorn>=0.30\n"
+        "gradio>=5.0\n"
     )
 
     python_line = 'python_version: "3.10"\n' if is_sentinel else ""
