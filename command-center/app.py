@@ -129,41 +129,35 @@ ROLE_COLORS = {
 
 PHASE_COLORS = {"DIVERGE": "#3b82f6", "DEEPEN": "#f59e0b", "CONVERGE": "#10b981", "SYNTHESIZE": "#8b5cf6"}
 
-# Shared sync HTTP client -- KEEPALIVE DISABLED.
-# CC polls every 15-60s; uvicorn's default keepalive_timeout is 5s, so any pooled
-# connection will be silently closed by the server between polls. The next request
-# on that pooled connection raises RemoteProtocolError ("Server disconnected without
-# sending a response"), which httpx.HTTPTransport(retries=N) does NOT retry (retries
-# only fires on connect-level failures, not protocol errors mid-request).
-# Fix: max_keepalive_connections=0 forces a fresh TCP connection per request.
-# We ALSO wrap requests in safe_get/safe_post with an explicit retry loop as belt+braces.
-_shared_client = None
-_client_lock = threading.Lock()
+# Per-thread HTTP clients -- no shared pool.
+# A single shared client + _reset_client() inside ThreadPoolExecutor workers is
+# unsafe: one thread's transport error nukes the client mid-flight for all other
+# threads, making healthy spores appear offline. threading.local() gives each
+# worker its own client so resets are isolated to the faulting thread.
+_tls = threading.local()
+
 
 def _get_client():
-    global _shared_client
-    if _shared_client is None or _shared_client.is_closed:
-        with _client_lock:
-            if _shared_client is None or _shared_client.is_closed:
-                _shared_client = httpx.Client(
-                    timeout=httpx.Timeout(8.0, connect=4.0),
-                    limits=httpx.Limits(max_connections=20, max_keepalive_connections=0),
-                    follow_redirects=True,
-                    transport=httpx.HTTPTransport(retries=2),
-                )
-    return _shared_client
+    """Return a per-thread httpx.Client (keepalive disabled)."""
+    client = getattr(_tls, "client", None)
+    if client is None or client.is_closed:
+        _tls.client = httpx.Client(
+            timeout=httpx.Timeout(8.0, connect=4.0),
+            limits=httpx.Limits(max_connections=1, max_keepalive_connections=0),
+            follow_redirects=True,
+        )
+    return _tls.client
 
 
 def _reset_client():
-    """Drop the shared client so the next request opens a fresh pool."""
-    global _shared_client
-    with _client_lock:
-        if _shared_client is not None:
-            try:
-                _shared_client.close()
-            except Exception:
-                pass
-            _shared_client = None
+    """Close this thread's client; next call to _get_client() opens a fresh one."""
+    client = getattr(_tls, "client", None)
+    if client is not None:
+        try:
+            client.close()
+        except Exception:
+            pass
+        _tls.client = None
 
 
 def esc(text):
@@ -246,40 +240,64 @@ def _poll_node(nid, node):
     return node, new_peers
 
 
+# Guards against concurrent discoveries launched by multiple Gradio sessions.
+# Without this, two simultaneous calls each take a snapshot of _registry["nodes"],
+# poll in parallel, then the second writeback clobbers the first with stale data,
+# flipping groups of spores back to offline.
+_discovery_in_flight = False
+
+
 def discover_nodes():
     """Poll all known nodes in PARALLEL using threads. Gradio-safe."""
+    global _discovery_in_flight
     now = time.time()
     with _registry["lock"]:
         if now - _registry["last_discovery"] < 15:
             return
+        if _discovery_in_flight:
+            return  # another session is already mid-discovery; skip, don't clobber
+        _discovery_in_flight = True
         _registry["last_discovery"] = now
 
-    nodes = dict(_registry["nodes"])
-    commanders = dict(_registry["commanders"])
+    try:
+        # Snapshot just the node IDs + current state to build the work queue.
+        with _registry["lock"]:
+            work_items = list(_registry["nodes"].items())
 
-    import concurrent.futures
-    with concurrent.futures.ThreadPoolExecutor(max_workers=10) as pool:
-        futures = {pool.submit(_poll_node, nid, node): nid for nid, node in list(nodes.items())}
-        try:
-            # 60s window absorbs 20s cold-start health + 5s fed + one retry per poll.
-            for future in concurrent.futures.as_completed(futures, timeout=60):
-                try:
-                    node, new_peers = future.result()
-                    nodes[node["id"]] = node
-                    for peer_id, peer_info in new_peers.items():
-                        if peer_id not in nodes:
-                            nodes[peer_id] = peer_info
+        import concurrent.futures
+        updated_nodes = {}
+        updated_commanders = {}
+
+        with concurrent.futures.ThreadPoolExecutor(max_workers=10) as pool:
+            futures = {pool.submit(_poll_node, nid, node): nid for nid, node in work_items}
+            try:
+                # 60s window absorbs 20s cold-start health + 5s fed + one retry per poll.
+                for future in concurrent.futures.as_completed(futures, timeout=60):
+                    try:
+                        node, new_peers = future.result()
+                        updated_nodes[node["id"]] = node
+                        for peer_id, peer_info in new_peers.items():
+                            updated_nodes.setdefault(peer_id, peer_info)
                             cmd = peer_info.get("commander", "unknown")
-                            if cmd not in commanders:
-                                commanders[cmd] = {"name": cmd, "color": "#6b7280", "sentinel": None}
-                except Exception:
-                    pass
-        except concurrent.futures.TimeoutError:
-            pass  # write back whatever completed within the window
+                            if cmd not in updated_commanders:
+                                updated_commanders[cmd] = {"name": cmd, "color": "#6b7280", "sentinel": None}
+                    except Exception:
+                        pass
+            except concurrent.futures.TimeoutError:
+                pass  # merge whatever completed; timed-out nodes keep previous state
 
-    with _registry["lock"]:
-        _registry["nodes"] = nodes
-        _registry["commanders"] = commanders
+        # Merge-only writeback: only update nodes that were polled this cycle.
+        # Nodes whose futures didn't complete keep their existing state in the registry
+        # rather than being silently overwritten with a stale snapshot entry.
+        with _registry["lock"]:
+            for nid, node in updated_nodes.items():
+                _registry["nodes"][nid] = node
+            for cmd, info in updated_commanders.items():
+                if cmd not in _registry["commanders"]:
+                    _registry["commanders"][cmd] = info
+    finally:
+        with _registry["lock"]:
+            _discovery_in_flight = False
 
 
 def get_all_nodes():

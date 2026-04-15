@@ -2453,6 +2453,7 @@ trust = TrustStore()
 # --- StateWAL instances for non-memory state ---
 _trust_wal = StateWAL(SPORE_ID, "trust")
 _cognitive_wal = StateWAL(SPORE_ID, "cognitive")
+_spore_state_wal = StateWAL(SPORE_ID, "spore_state")
 
 # Bind WALs to their respective classes
 trust.bind_wal(_trust_wal)
@@ -2521,6 +2522,25 @@ if _cog_wal_entries:
             continue
     if _restored_insights:
         log.info("[WAL] Restored %d cognitive entries from WAL", _restored_insights)
+
+# --- Restore SporeState counters (deltas/cycles) from WAL ---
+_state_wal_entries = _spore_state_wal.replay()
+if _state_wal_entries:
+    for _e in _state_wal_entries:
+        try:
+            if _e.get("t") == "counter":
+                _d = _e.get("d", {})
+                _field = _d.get("field")
+                if _field in ("deltas_produced", "deltas_received", "reasoning_cycles"):
+                    setattr(spore_state, _field, getattr(spore_state, _field, 0) + _d.get("delta", 0))
+        except Exception:
+            continue
+    log.info(
+        "[WAL] Restored spore_state counters: cycles=%d dp=%d dr=%d",
+        spore_state.reasoning_cycles,
+        spore_state.deltas_produced,
+        spore_state.deltas_received,
+    )
 
 # --- GitHub backup engine ---
 _github_backup = GitHubBackup(SPORE_ID)
@@ -2851,6 +2871,8 @@ async def reason_on_task(task):
     task.add_delta(delta)
     spore_state.deltas_produced += 1
     spore_state.reasoning_cycles += 1
+    _spore_state_wal.append("counter", {"field": "deltas_produced", "delta": 1})
+    _spore_state_wal.append("counter", {"field": "reasoning_cycles", "delta": 1})
 
     # Store reasoning in persistent memory -- guard against empty/short responses
     _hyp = primary_hypothesis
@@ -3437,6 +3459,7 @@ def process_gossip_response(data):
             task = spore_state.get_or_create_task(tid)
             if task.add_delta(d):
                 spore_state.deltas_received += 1
+                _spore_state_wal.append("counter", {"field": "deltas_received", "delta": 1})
 
     # Merge CRDT memory
     mem_data = data.get("memory")
@@ -4873,6 +4896,9 @@ async def api_task_submit(request: Request):
 
 @api.get("/api/health")
 async def api_health():
+    _trust_map = trust.get_all()
+    _peer_scores = [v.get("overall", 0.5) for v in _trust_map.values() if isinstance(v, dict)]
+    _confidence = round(sum(_peer_scores) / len(_peer_scores), 3) if _peer_scores else 0.5
     return JSONResponse({
         "spore": SPORE_ID,
         "role": MY_ROLE,
@@ -4883,6 +4909,7 @@ async def api_health():
         "cycles": spore_state.reasoning_cycles,
         "deltas_produced": spore_state.deltas_produced,
         "deltas_received": spore_state.deltas_received,
+        "confidence": _confidence,
         "peers": list(spore_state.peers_seen),
         "active_tasks": len([t for t in spore_state.tasks.values() if not t.converged]),
         "converged_tasks": len([t for t in spore_state.tasks.values() if t.converged]),
