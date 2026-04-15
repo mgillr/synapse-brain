@@ -286,6 +286,13 @@ EXTERNAL_PROVIDERS = {
         "model": "meta-llama/Llama-4-Maverick-17B-128E-Instruct-FP8",
         "tier": "worker",
     },
+    # --- GitHub Models (Phi-4 Mini via Azure AI Inference) ---
+    "github_phi4mini": {
+        "env": "GITHUB_MODELS_PAT",
+        "url": "https://models.inference.ai.azure.com/chat/completions",
+        "model": "Phi-4-mini",
+        "tier": "worker",
+    },
     # --- Reserve tier: come online when quotas reset ---
     "google_ai": {
         "env": "GOOGLE_AI_KEY",

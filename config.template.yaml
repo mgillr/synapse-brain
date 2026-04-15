@@ -31,6 +31,7 @@ private: true
 #   OpenRouter: https://openrouter.ai/          (13+ free models, per-model limits)
 #   Google AI:  https://aistudio.google.com/    (Gemini 2.5 Flash, 15 req/min)
 #   LLM API:    https://llmapi.com/             (Llama-4-Maverick, worker tier)
+#   GitHub:     https://github.com/marketplace/models  (Phi-4 Mini, free tier)
 #
 # OpenRouter gives 13 independent rate-limit buckets from one key:
 #   Nemotron-120B, GPT-OSS-120B, Trinity Large, Gemma 3 4B,
@@ -43,6 +44,7 @@ api_keys:
   openrouter: ""       # 13 free models with independent rate limits
   google_ai: ""        # Reserve -- Gemini 2.5 Flash
   llmapi: ""           # LLM API -- Llama-4-Maverick worker tier
+  github_models: ""    # GitHub Models PAT -- Phi-4 Mini (Azure AI Inference)
 
 # Command Center (optional)
 # deploy_cc: true         # Deploy a CC Space automatically
