@@ -219,7 +219,8 @@ def _poll_node(nid, node):
     node["cycles"] = health.get("cycles", health.get("reasoning_cycles", 0))
     node["deltas_produced"] = health.get("deltas_produced", 0)
     node["deltas_received"] = health.get("deltas_received", 0)
-    node["confidence"] = health.get("confidence", 0)
+    node["confidence"] = health.get("confidence", 0.5)
+    node["wal_backend"] = health.get("wal_backend", "unknown")
     node["tier"] = health.get("last_tier", health.get("tier", "worker"))
     node["peers"] = health.get("peers", health.get("connected_peers", []))
     n_peers = len(node["peers"]) if isinstance(node["peers"], list) else (int(node["peers"]) if node["peers"] else 0)
@@ -393,12 +394,15 @@ def build_topology():
             cyc = n.get("cycles", 0)
             dp = n.get("deltas_produced", 0)
             dr = n.get("deltas_received", 0)
-            conf = n.get("confidence", 0)
+            conf = n.get("confidence", 0.5)
             conf_pct = int(conf * 100) if conf <= 1 else int(conf)
             tier = n.get("tier", "worker")
             tier_bg = "#ec4899" if "brain" in str(tier).lower() else "#334155"
             if role.lower() == "sentinel":
                 tier_bg = "#f97316"
+            wal = n.get("wal_backend", "")
+            wal_icon = "&#128190;" if wal == "persistent" else ("&#9888;" if wal == "ephemeral" else "")
+            wal_color = "#10b981" if wal == "persistent" else ("#f59e0b" if wal == "ephemeral" else "#6b7280")
             model_short = n.get("model", "?")
             if "/" in model_short:
                 model_short = model_short.split("/")[-1]
@@ -410,6 +414,7 @@ def build_topology():
               <td style="padding:1px 4px"><span style="background:{role_color};color:#fff;padding:0px 4px;border-radius:4px;font-size:9px">{esc(role)}</span></td>
               <td style="padding:1px 4px;font-size:10px;color:#64748b;white-space:nowrap">{esc(model_short)}</td>
               <td style="padding:1px 4px"><span style="background:{tier_bg};color:#fff;padding:0px 3px;border-radius:3px;font-size:8px">{esc(str(tier).upper()[:6])}</span></td>
+              <td style="padding:1px 4px;font-size:10px;color:{wal_color};text-align:center" title="WAL: {esc(wal)}">{wal_icon}</td>
               <td style="padding:1px 4px;font-size:10px;color:#64748b;text-align:right">{mem:,}</td>
               <td style="padding:1px 4px;font-size:10px;color:#64748b;text-align:right">{cyc}</td>
               <td style="padding:1px 4px;font-size:10px;color:#64748b;text-align:right">{dp+dr}</td>
@@ -428,6 +433,7 @@ def build_topology():
                   <th style="padding:1px 4px;font-size:9px;color:#475569;text-align:left">Role</th>
                   <th style="padding:1px 4px;font-size:9px;color:#475569;text-align:left">Model</th>
                   <th style="padding:1px 4px;font-size:9px;color:#475569;text-align:left">Tier</th>
+                  <th style="padding:1px 4px;font-size:9px;color:#475569;text-align:center" title="WAL persistence: disk=persistent, /tmp=ephemeral">WAL</th>
                   <th style="padding:1px 4px;font-size:9px;color:#475569;text-align:right">Mem</th>
                   <th style="padding:1px 4px;font-size:9px;color:#475569;text-align:right">Cyc</th>
                   <th style="padding:1px 4px;font-size:9px;color:#475569;text-align:right">Del</th>

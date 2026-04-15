@@ -2644,10 +2644,14 @@ def _shutdown_handler(signum=None, frame=None):
     except Exception as e:
         log.warning("Cognitive WAL flush error: %s", e)
     try:
+        _spore_state_wal.flush()
+    except Exception as e:
+        log.warning("SporeState WAL flush error: %s", e)
+    try:
         # Synchronous backup push on shutdown
         wal_paths = [p for p in [
             memory.wal_path(), trust.wal_path,
-            _trust_wal.path, _cognitive_wal.path,
+            _trust_wal.path, _cognitive_wal.path, _spore_state_wal.path,
         ] if p and os.path.exists(p)]
         if wal_paths:
             loop = asyncio.new_event_loop()
@@ -3751,6 +3755,24 @@ async def heartbeat():
                                             emergence._claim_origins[chash][cspore] = entry.get("ts", time.time())
                                 except Exception:
                                     continue
+                    elif fname.startswith("spore_state_") and fname.endswith(".wal"):
+                        for line in open(restored_path):
+                            try:
+                                _e = json.loads(line.strip())
+                                if _e.get("t") == "counter":
+                                    _d = _e.get("d", {})
+                                    _field = _d.get("field")
+                                    if _field in ("deltas_produced", "deltas_received", "reasoning_cycles"):
+                                        setattr(spore_state, _field,
+                                                getattr(spore_state, _field, 0) + _d.get("delta", 0))
+                            except Exception:
+                                continue
+                        log.info(
+                            "[Restore] SporeState counters: cycles=%d dp=%d dr=%d",
+                            spore_state.reasoning_cycles,
+                            spore_state.deltas_produced,
+                            spore_state.deltas_received,
+                        )
                 log.info(
                     "[Restore] State after GitHub restore: %d memories, %d trust entries",
                     memory.size, sum(len(v) for v in trust.get_all().values()) if trust.get_all() else 0,
@@ -3862,7 +3884,7 @@ async def heartbeat():
                     try:
                         _wal_paths = [p for p in [
                             memory.wal_path(), trust.wal_path,
-                            _trust_wal.path, _cognitive_wal.path,
+                            _trust_wal.path, _cognitive_wal.path, _spore_state_wal.path,
                         ] if p and os.path.exists(p)]
                         if _wal_paths:
                             await _github_backup.push(_wal_paths)
@@ -4899,13 +4921,19 @@ async def api_health():
     _trust_map = trust.get_all()
     _peer_scores = [v.get("overall", 0.5) for v in _trust_map.values() if isinstance(v, dict)]
     _confidence = round(sum(_peer_scores) / len(_peer_scores), 3) if _peer_scores else 0.5
+    _wal_backend = "persistent" if os.path.isdir("/data") else "ephemeral"
+    _mem_private = memory.size
+    _mem_collective = getattr(dual_memory, "collective_size", 0) if dual_memory else 0
     return JSONResponse({
         "spore": SPORE_ID,
         "role": MY_ROLE,
         "model": PRIMARY_MODEL,
         "version": "7.0.0",
         "clock": memory.clock.to_dict(),
-        "memories": memory.size,
+        "memories": _mem_private + _mem_collective,
+        "memories_private": _mem_private,
+        "memories_collective": _mem_collective,
+        "wal_backend": _wal_backend,
         "cycles": spore_state.reasoning_cycles,
         "deltas_produced": spore_state.deltas_produced,
         "deltas_received": spore_state.deltas_received,
