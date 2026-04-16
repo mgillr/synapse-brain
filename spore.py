@@ -151,6 +151,7 @@ THINKING_MODELS = {
     "deepseek-ai/DeepSeek-R1",
     "deepseek-ai/DeepSeek-R1-Distill-Qwen-32B",
     "deepseek-ai/DeepSeek-R1-0528",
+    "deepseek/DeepSeek-R1",
     "Qwen/Qwen3-235B-A22B",
     "Qwen/Qwen3-32B",
     "Qwen/QwQ-32B",
@@ -292,6 +293,31 @@ EXTERNAL_PROVIDERS = {
         "url": "https://generativelanguage.googleapis.com/v1beta/openai/chat/completions",
         "model": "gemini-2.5-flash",
         "tier": "worker",
+    },
+    # --- GitHub Models (4 independent models, separate rate limits) ---
+    "gh_gpt4o_mini": {
+        "env": "GITHUB_MODELS_KEY",
+        "url": "https://models.github.ai/inference/chat/completions",
+        "model": "openai/gpt-4o-mini",
+        "tier": "worker",
+    },
+    "gh_gpt41_mini": {
+        "env": "GITHUB_MODELS_KEY",
+        "url": "https://models.github.ai/inference/chat/completions",
+        "model": "openai/gpt-4.1-mini",
+        "tier": "worker",
+    },
+    "gh_llama405b": {
+        "env": "GITHUB_MODELS_KEY",
+        "url": "https://models.github.ai/inference/chat/completions",
+        "model": "meta/Meta-Llama-3.1-405B-Instruct",
+        "tier": "brain",
+    },
+    "gh_deepseek_r1": {
+        "env": "GITHUB_MODELS_KEY",
+        "url": "https://models.github.ai/inference/chat/completions",
+        "model": "deepseek/DeepSeek-R1",
+        "tier": "brain",
     },
 }
 
@@ -5203,6 +5229,7 @@ async def api_debug():
         "ZAI_API_KEY": bool(os.environ.get("ZAI_API_KEY")),
         "OPENROUTER_KEY": bool(os.environ.get("OPENROUTER_KEY")),
         "GOOGLE_AI_KEY": bool(os.environ.get("GOOGLE_AI_KEY")),
+        "GITHUB_MODELS_KEY": bool(os.environ.get("GITHUB_MODELS_KEY")),
         "MY_ROLE": MY_ROLE,
         "PRIMARY_MODEL": PRIMARY_MODEL,
         "SPORE_ID": SPORE_ID,
